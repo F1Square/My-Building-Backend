@@ -67,7 +67,21 @@ router.patch('/profile', authenticate, async (req, res) => {
     updates.phone = trimmed;
   }
 
-  if (flat_no !== undefined) updates.flat_no = flat_no?.trim() || null;
+  if (flat_no !== undefined) {
+    const trimmedFlat = flat_no?.trim() || null;
+    if (trimmedFlat && req.user.building_id) {
+      // Check flat_no uniqueness within the same building (exclude current user)
+      const { data: existingFlat } = await supabase
+        .from('users')
+        .select('id')
+        .eq('flat_no', trimmedFlat)
+        .eq('building_id', req.user.building_id)
+        .neq('id', req.user.id)
+        .single();
+      if (existingFlat) return res.status(409).json({ error: 'This flat number is already assigned to another resident' });
+    }
+    updates.flat_no = trimmedFlat;
+  }
   if (wing !== undefined) updates.wing = wing?.trim() || null;
   if (total_members !== undefined) updates.total_members = total_members ? Number(total_members) : null;
 

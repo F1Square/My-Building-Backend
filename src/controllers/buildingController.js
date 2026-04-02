@@ -135,7 +135,7 @@ exports.getBuildingMembers = async (req, res) => {
   const building_id = req.user.role === 'admin' ? req.params.building_id : req.user.building_id;
   const { data, error } = await supabase
     .from('users')
-    .select('id, name, email, phone, role, status, flat_no')
+    .select('id, name, email, phone, role, status, flat_no, wing')
     .eq('building_id', building_id)
     .order('flat_no', { ascending: true });
   if (error) return res.status(400).json({ error: error.message });

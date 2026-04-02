@@ -58,8 +58,8 @@ exports.getComplaints = async (req, res) => {
     .order('created_at', { ascending: false })
     .limit(100);
 
-  // Filter to own complaints only when ?mine=true or role is user
-  if (mineOnly || req.user.role === 'user') {
+  // Filter to own complaints only when ?mine=true is explicitly passed
+  if (mineOnly) {
     query = query.eq('user_id', req.user.id);
   }
 
