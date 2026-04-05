@@ -11,10 +11,11 @@ router.use('/meetings', require('./meetings'));
 router.use('/chat', require('./chat'));
 router.use('/vehicles', require('./vehicles'));
 router.use('/notifications', require('./notifications'));
-router.use('/complaints', require('./complaints'));
 router.use('/announcements', require('./announcements'));
 router.use('/inquiries', require('./inquiries'));
 router.use('/subscriptions', require('./subscriptions'));
 router.use('/helpline', require('./helpline'));
+router.use('/expenses', require('./expenses'));
+router.use('/promos', require('./promos'));
 
 module.exports = router;

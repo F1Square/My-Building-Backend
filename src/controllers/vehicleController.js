@@ -1,8 +1,46 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
 
+// Indian vehicle number: 2 letters + 2 digits + 1-3 letters + 4 digits  e.g. GJ05HR4533
 const VEHICLE_RE = /^[A-Z]{2}\d{2}[A-Z]{1,3}\d{4}$/;
 const VALID_TYPES = ['two_wheeler', 'four_wheeler'];
+
+// Admin: edit any vehicle
+exports.adminUpdateVehicle = async (req, res) => {
+  const { id } = req.params;
+  const { vehicle_number, vehicle_type } = req.body;
+
+  const { data: vehicle } = await supabase.from('vehicles').select('id').eq('id', id).single();
+  if (!vehicle) return res.status(404).json({ error: 'Vehicle not found' });
+
+  const updates = {};
+  if (vehicle_number) {
+    const vNum = vehicle_number.toUpperCase().replace(/\s/g, '');
+    if (!VEHICLE_RE.test(vNum)) return res.status(422).json({ error: 'Enter a valid vehicle number (e.g. GJ05HR4533)' });
+    // Check uniqueness excluding this vehicle
+    const { data: dup } = await supabase.from('vehicles').select('id').eq('vehicle_number', vNum).neq('id', id).single();
+    if (dup) return res.status(409).json({ error: 'This vehicle number is already registered' });
+    updates.vehicle_number = vNum;
+  }
+  if (vehicle_type) {
+    if (!VALID_TYPES.includes(vehicle_type)) return res.status(422).json({ error: 'vehicle_type must be two_wheeler or four_wheeler' });
+    updates.vehicle_type = vehicle_type;
+  }
+
+  const { data, error } = await supabase.from('vehicles').update(updates).eq('id', id).select().single();
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Vehicle updated', vehicle: data });
+};
+
+// Admin: delete any vehicle
+exports.adminDeleteVehicle = async (req, res) => {
+  const { id } = req.params;
+  const { data: vehicle } = await supabase.from('vehicles').select('id').eq('id', id).single();
+  if (!vehicle) return res.status(404).json({ error: 'Vehicle not found' });
+  const { error } = await supabase.from('vehicles').delete().eq('id', id);
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Vehicle deleted' });
+};
 
 // User: delete own vehicle
 exports.deleteVehicle = async (req, res) => {
@@ -24,7 +62,11 @@ exports.addVehicle = async (req, res) => {
   if (!building_id) return res.status(400).json({ error: 'You must be part of a building' });
   if (!VALID_TYPES.includes(vehicle_type)) return res.status(422).json({ error: 'vehicle_type must be two_wheeler or four_wheeler' });
   const vNum = vehicle_number.toUpperCase().replace(/\s/g, '');
-  if (!VEHICLE_RE.test(vNum)) return res.status(422).json({ error: 'Enter a valid vehicle number (e.g. GJ01AB1234)' });
+  if (!VEHICLE_RE.test(vNum)) return res.status(422).json({ error: 'Enter a valid vehicle number (e.g. GJ05HR4533)' });
+
+  // Global uniqueness — vehicle number must be unique across all buildings
+  const { data: existing } = await supabase.from('vehicles').select('id').eq('vehicle_number', vNum).single();
+  if (existing) return res.status(409).json({ error: 'This vehicle number is already registered' });
 
   const { data, error } = await supabase
     .from('vehicles')

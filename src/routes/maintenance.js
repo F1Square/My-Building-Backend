@@ -3,10 +3,10 @@ const { authenticate, requireRole } = require('../middleware/auth');
 const c = require('../controllers/maintenanceController');
 
 router.post('/bills', authenticate, requireRole('pramukh', 'admin'), c.addBill);
+router.patch('/bills', authenticate, requireRole('pramukh', 'admin'), c.updateBill);
 router.get('/bills', authenticate, c.getBills);
 router.get('/payments', authenticate, c.getPaymentRecords);
 router.post('/pay/order', authenticate, requireRole('user', 'pramukh'), c.createPaymentOrder);
-router.post('/pay/cash', authenticate, requireRole('pramukh', 'admin'), c.markCashPaid);
 router.get('/pay/checkout/:order_id', c.checkoutPage);   // serves HTML page — no auth (opened in browser)
 router.post('/pay/callback', c.paymentCallback);          // called via fetch from checkout page
 router.get('/pay/callback', c.paymentCallback);           // GET fallback

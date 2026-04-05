@@ -9,5 +9,8 @@ router.get('/building', authenticate, requireRole('pramukh', 'admin', 'user'), c
 router.post('/report', authenticate, requireRole('user', 'admin'), c.reportParking);
 router.get('/reports', authenticate, requireRole('pramukh', 'admin', 'user'), c.getParkingReports);
 router.post('/reminder', authenticate, requireRole('pramukh', 'admin'), c.sendParkingReminder);
+// Admin: manage any vehicle
+router.patch('/admin/:id', authenticate, requireRole('admin'), c.adminUpdateVehicle);
+router.delete('/admin/:id', authenticate, requireRole('admin'), c.adminDeleteVehicle);
 
 module.exports = router;

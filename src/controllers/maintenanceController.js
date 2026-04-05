@@ -2,6 +2,7 @@ const supabase = require('../supabase');
 const Razorpay = require('razorpay');
 const PDFDocument = require('pdfkit');
 const ns = require('../utils/notificationService');
+const addMaintenanceExpense = require('../utils/addMaintenanceExpense');
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -13,7 +14,7 @@ const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
 
 // Pramukh/Admin: add monthly maintenance bill
 exports.addBill = async (req, res) => {
-  const { amount, month, year, due_date, description } = req.body;
+  const { amount, month, year, due_date, description, penalty_amount } = req.body;
   const building_id = req.user.building_id || req.body.building_id;
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
   if (!amount || !month || !year) return res.status(422).json({ error: 'amount, month and year are required' });
@@ -31,10 +32,14 @@ exports.addBill = async (req, res) => {
   if (due_date && isNaN(Date.parse(due_date))) return res.status(422).json({ error: 'due_date must be a valid date' });
   if (description && description.trim().length > 500) return res.status(422).json({ error: 'description must not exceed 500 characters' });
 
+  const parsedPenalty = penalty_amount ? parseFloat(penalty_amount) : 0;
+  if (isNaN(parsedPenalty) || parsedPenalty < 0) return res.status(422).json({ error: 'penalty_amount must be a non-negative number' });
+
   const { data: bill, error } = await supabase
     .from('maintenance_bills')
     .insert({
-      building_id, amount, month, year, due_date, description,
+      building_id, amount: parsedAmount, month, year, due_date, description,
+      penalty_amount: parsedPenalty,
       created_by: req.user.id
     })
     .select().single();
@@ -46,17 +51,65 @@ exports.addBill = async (req, res) => {
 
   if (members?.length) {
     await supabase.from('maintenance_payments').insert(
-      members.map((m) => ({ bill_id: bill.id, user_id: m.id, building_id, amount, status: 'pending' }))
+      members.map((m) => ({
+        bill_id: bill.id, user_id: m.id, building_id,
+        amount: parsedAmount,
+        penalty_amount: parsedPenalty,
+        total_amount: parsedAmount, // penalty applied only after due date
+        status: 'pending'
+      }))
     );
     await ns.notifyMembers(building_id, {
       title: '🧾 Maintenance Bill',
-      body: `New bill of ₹${amount} for ${MONTHS[month]} ${year}. Due: ${due_date || 'N/A'}`,
+      body: `New bill of ₹${parsedAmount} for ${MONTHS[month]} ${year}. Due: ${due_date || 'N/A'}${parsedPenalty > 0 ? `. Penalty: ₹${parsedPenalty} after due date` : ''}`,
       type: 'bill',
       meta: { bill_id: bill.id }
     });
   }
 
   res.status(201).json({ message: 'Bill added', bill });
+};
+
+// Pramukh/Admin: update an existing bill (penalty, description, due_date)
+exports.updateBill = async (req, res) => {
+  const { bill_id, penalty_amount, description, due_date } = req.body;
+  if (!bill_id) return res.status(422).json({ error: 'bill_id is required' });
+
+  const { data: bill } = await supabase.from('maintenance_bills').select('*').eq('id', bill_id).single();
+  if (!bill) return res.status(404).json({ error: 'Bill not found' });
+
+  // Pramukh can only edit their own building
+  if (req.user.role === 'pramukh' && bill.building_id !== req.user.building_id)
+    return res.status(403).json({ error: 'Access denied' });
+
+  const updates = {};
+  if (penalty_amount !== undefined) {
+    const p = parseFloat(penalty_amount);
+    if (isNaN(p) || p < 0) return res.status(422).json({ error: 'penalty_amount must be non-negative' });
+    updates.penalty_amount = p;
+  }
+  if (description !== undefined) updates.description = description?.trim();
+  if (due_date !== undefined) updates.due_date = due_date || null;
+
+  // Only set is_edited/updated_at if we have something to update
+  if (Object.keys(updates).length > 0) {
+    updates.is_edited = true;
+    updates.updated_at = new Date().toISOString();
+  }
+
+  const { data: updated, error } = await supabase
+    .from('maintenance_bills').update(updates).eq('id', bill_id).select().single();
+  if (error) return res.status(400).json({ error: error.message });
+
+  // Update pending payments' penalty_amount too
+  if (penalty_amount !== undefined) {
+    await supabase.from('maintenance_payments')
+      .update({ penalty_amount: updates.penalty_amount })
+      .eq('bill_id', bill_id)
+      .eq('status', 'pending');
+  }
+
+  res.json({ message: 'Bill updated', bill: updated });
 };
 
 // Get all bills for a building
@@ -79,7 +132,7 @@ exports.getPaymentRecords = async (req, res) => {
 
   let query = supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(month, year, amount, due_date, description), users(name, flat_no, email, phone)');
+    .select('*, maintenance_bills(month, year, amount, due_date, description), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone)');
 
   if (building_id) {
     query = query.eq('building_id', building_id);
@@ -103,21 +156,33 @@ exports.createPaymentOrder = async (req, res) => {
   // Fetch payment record with bill, user, and building info
   const { data: record, error: recErr } = await supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(amount, month, year), users(name, flat_no, phone), buildings(name, address)')
+    .select('*, maintenance_bills(amount, month, year, due_date, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, phone), buildings(name, address)')
     .eq('id', payment_record_id).eq('user_id', req.user.id).single();
 
   if (recErr || !record) return res.status(404).json({ error: 'Payment record not found' });
   if (record.status === 'paid') return res.status(400).json({ error: 'Already paid' });
 
-  // Fetch society bank details for this building — used in notes for reconciliation
-  const { data: bankDetails } = await supabase
-    .from('building_bank_details')
-    .select('bank_name, bank_account, bank_ifsc, bank_branch')
-    .eq('building_id', record.building_id)
-    .single();
+  // Calculate total: apply penalty if past due date
+  const billAmount = Number(record.maintenance_bills.amount);
+  const penaltyAmount = Number(record.penalty_amount || record.maintenance_bills.penalty_amount || 0);
+  const dueDate = record.maintenance_bills.due_date;
+  const isOverdue = dueDate && new Date(dueDate) < new Date();
+  const totalAmount = billAmount + (isOverdue && penaltyAmount > 0 ? penaltyAmount : 0);
+
+  // Store total_amount on the payment record
+  await supabase.from('maintenance_payments')
+    .update({ total_amount: totalAmount, penalty_amount: isOverdue ? penaltyAmount : 0 })
+    .eq('id', payment_record_id);
 
   try {
-    const amountPaise = Math.round(Number(record.maintenance_bills.amount) * 100);
+    const amountPaise = Math.round(totalAmount * 100);
+
+    // Fetch society bank details for this building — used in notes for reconciliation
+    const { data: bankDetails } = await supabase
+      .from('building_bank_details')
+      .select('bank_name, bank_account, bank_ifsc, bank_branch')
+      .eq('building_id', record.building_id)
+      .single();
 
     // Embed society + payer info in Razorpay notes for audit/reconciliation
     const notes = {
@@ -129,6 +194,9 @@ exports.createPaymentOrder = async (req, res) => {
       payer_flat: record.users?.flat_no || '',
       payer_phone: record.users?.phone || '',
       bill_period: `${MONTHS[record.maintenance_bills.month]} ${record.maintenance_bills.year}`,
+      bill_amount: billAmount,
+      penalty_amount: isOverdue ? penaltyAmount : 0,
+      total_amount: totalAmount,
       payment_record_id,
       building_id: record.building_id,
     };
@@ -147,7 +215,7 @@ exports.createPaymentOrder = async (req, res) => {
     const backendUrl = process.env.BACKEND_URL;
     if (!backendUrl) return res.status(500).json({ error: 'BACKEND_URL not set in .env' });
 
-    const checkoutUrl = `${backendUrl}/api/maintenance/pay/checkout/${order.id}?record_id=${payment_record_id}&amount=${order.amount}&key=${process.env.RAZORPAY_KEY_ID}&society=${encodeURIComponent(record.buildings?.name || 'Society')}`;
+    const checkoutUrl = `${backendUrl}/api/maintenance/pay/checkout/${order.id}?record_id=${payment_record_id}&amount=${order.amount}&key=${process.env.RAZORPAY_KEY_ID}&society=${encodeURIComponent(record.buildings?.name || 'Society')}&penalty=${isOverdue && penaltyAmount > 0 ? penaltyAmount : 0}&bill=${billAmount}`;
 
     res.json({
       order_id: order.id,
@@ -157,6 +225,10 @@ exports.createPaymentOrder = async (req, res) => {
       checkout_url: checkoutUrl,
       payment_record_id,
       society_name: record.buildings?.name,
+      bill_amount: billAmount,
+      penalty_amount: isOverdue ? penaltyAmount : 0,
+      total_amount: totalAmount,
+      is_overdue: isOverdue && penaltyAmount > 0,
     });
   } catch (err) {
     console.error('Razorpay order error:', err);
@@ -167,10 +239,15 @@ exports.createPaymentOrder = async (req, res) => {
 // Serve Razorpay checkout HTML page (opened in browser)
 exports.checkoutPage = (req, res) => {
   const { order_id } = req.params;
-  const { record_id, amount, key, society } = req.query;
+  const { record_id, amount, key, society, penalty, bill } = req.query;
   const backendUrl = process.env.BACKEND_URL || '';
   const callbackUrl = `${backendUrl}/api/maintenance/pay/callback?record_id=${record_id}`;
   const societyName = decodeURIComponent(society || 'Society');
+  const penaltyAmt = parseFloat(penalty || 0);
+  const billAmt = parseFloat(bill || 0);
+  const penaltyLine = penaltyAmt > 0
+    ? `<div class="breakdown"><span>Bill</span><span>₹${billAmt.toLocaleString('en-IN')}</span></div><div class="breakdown penalty"><span>⚠️ Late Penalty</span><span>+₹${penaltyAmt.toLocaleString('en-IN')}</span></div>`
+    : '';
 
   res.setHeader('Content-Type', 'text/html');
   res.send(`<!DOCTYPE html>
@@ -187,6 +264,8 @@ exports.checkoutPage = (req, res) => {
     .subtitle { color: #6B7280; font-size: 14px; margin-bottom: 20px; }
     .amount { font-size: 36px; font-weight: 800; color: #111827; margin-bottom: 4px; }
     .label { font-size: 13px; color: #9CA3AF; margin-bottom: 28px; }
+    .breakdown { display: flex; justify-content: space-between; font-size: 14px; color: #6B7280; margin-bottom: 4px; }
+    .breakdown.penalty { color: #DC2626; font-weight: 600; }
     .btn { background: #1E3A8A; color: #fff; border: none; border-radius: 12px; padding: 16px 32px; font-size: 16px; font-weight: 700; cursor: pointer; width: 100%; }
     .btn:disabled { opacity: 0.6; }
     .status { margin-top: 20px; font-size: 14px; color: #6B7280; }
@@ -198,8 +277,9 @@ exports.checkoutPage = (req, res) => {
     <div class="logo">🏢 My Building</div>
     <div class="society">${societyName}</div>
     <div class="subtitle">Maintenance Payment</div>
+    ${penaltyLine}
     <div class="amount">₹${Math.round(Number(amount) / 100).toLocaleString('en-IN')}</div>
-    <div class="label">Tap below to pay securely via Razorpay</div>
+    <div class="label">${penaltyAmt > 0 ? 'Total (includes late penalty)' : 'Tap below to pay securely via Razorpay'}</div>
     <button class="btn" id="payBtn" onclick="startPayment()">Pay Now</button>
     <div class="status" id="status"></div>
     <div class="secure">🔒 Secured by Razorpay · Payment ID logged for audit</div>
@@ -218,6 +298,16 @@ exports.checkoutPage = (req, res) => {
         name: "My Building",
         description: "${societyName} — Maintenance",
         theme: { color: "#1E3A8A" },
+        config: {
+          display: {
+            blocks: {
+              upi: { name: "Pay via UPI", instruments: [{ method: "upi" }] },
+              other: { name: "Other Methods", instruments: [{ method: "card" }, { method: "netbanking" }, { method: "wallet" }] }
+            },
+            sequence: ["block.upi", "block.other"],
+            preferences: { show_default_blocks: true }
+          }
+        },
         handler: function(response) {
           document.getElementById('status').textContent = 'Verifying payment...';
           fetch('${callbackUrl}', {
@@ -296,6 +386,10 @@ exports.paymentCallback = async (req, res) => {
   }).eq('id', record_id);
 
   if (error) return res.json({ success: false, error: error.message });
+
+  // Auto-add inflow to expenses module
+  await addMaintenanceExpense(record_id);
+
   res.json({ success: true });
 };
 
@@ -327,7 +421,7 @@ exports.downloadReceipt = async (req, res) => {
 
   const { data: record } = await supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(month, year, amount, due_date, description), users(name, flat_no, email, phone), buildings(name, address)')
+    .select('*, maintenance_bills(month, year, amount, due_date, description), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone), buildings(name, address)')
     .eq('id', payment_record_id).single();
 
   if (!record) return res.status(404).json({ error: 'Record not found' });
@@ -430,6 +524,9 @@ exports.markCashPaid = async (req, res) => {
   }).eq('id', payment_record_id);
 
   if (error) return res.status(400).json({ error: error.message });
+
+  // Auto-add inflow to expenses module
+  await addMaintenanceExpense(payment_record_id);
 
   // Notify the user
   await ns.notifyUser(record.user_id, {

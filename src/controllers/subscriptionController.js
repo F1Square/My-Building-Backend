@@ -9,7 +9,7 @@ const razorpay = new Razorpay({
 
 const PLANS = {
   monthly:  { amount: 1500,   label: '₹15/month',    months: 1  },   // paise
-  yearly:   { amount: 15000,  label: '₹150/year',    months: 12 },
+  yearly:   { amount: 18000,  label: '₹180/year',    months: 12 },
   lifetime: { amount: 150000, label: '₹1500 lifetime', months: null },
 };
 
@@ -25,18 +25,38 @@ exports.getMySubscription = async (req, res) => {
 
 // Create Razorpay order for subscription
 exports.createOrder = async (req, res) => {
-  const { plan } = req.body;
-  if (!PLANS[plan]) return res.status(422).json({ error: 'Invalid plan. Choose monthly or lifetime' });
+  const { plan, promo_id } = req.body;
+  if (!PLANS[plan]) return res.status(422).json({ error: 'Invalid plan. Choose monthly, yearly or lifetime' });
 
   const planInfo = PLANS[plan];
+  let amount = planInfo.amount;
+  let appliedPromo = null;
+
+  // Apply promo discount if provided
+  if (promo_id) {
+    const { data: promo } = await supabase
+      .from('promo_codes').select('*').eq('id', promo_id).single();
+    if (promo && !promo.is_used && (!promo.expires_at || new Date(promo.expires_at) > new Date())) {
+      if (promo.type === 'percent') {
+        amount = Math.max(100, Math.round(amount * (1 - promo.value / 100)));
+      } else {
+        // promo.value is in rupees, amount is in paise
+        amount = Math.max(100, amount - Math.round(promo.value * 100));
+      }
+      appliedPromo = promo;
+    } else if (promo?.is_used) {
+      return res.status(400).json({ error: 'This promo code has expired' });
+    }
+  }
+
   try {
     const order = await razorpay.orders.create({
-      amount: planInfo.amount,
+      amount,
       currency: 'INR',
       receipt: `sub_${req.user.id.slice(0, 20)}`,
-      notes: { user_id: req.user.id, plan, user_email: req.user.email },
+      notes: { user_id: req.user.id, plan, user_email: req.user.email, promo_id: promo_id || '' },
     });
-    res.json({ order_id: order.id, amount: order.amount, key: process.env.RAZORPAY_KEY_ID, plan });
+    res.json({ order_id: order.id, amount: order.amount, key: process.env.RAZORPAY_KEY_ID, plan, promo_applied: !!appliedPromo });
   } catch (err) {
     res.status(500).json({ error: 'Failed to create order: ' + (err.error?.description || err.message) });
   }
@@ -133,7 +153,7 @@ exports.adminRevoke = async (req, res) => {
 exports.adminGetAll = async (req, res) => {
   const { data, error } = await supabase
     .from('subscriptions')
-    .select('*, remark, users(name, email, role, building_id, buildings(name))')
+    .select('*, remark, paid_amount, promo_code_used, users(name, email, role, building_id, buildings(name))')
     .order('created_at', { ascending: false });
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);
@@ -167,7 +187,7 @@ exports.checkoutPage = (req, res) => {
   const { amount, key, plan, user_id } = req.query;
   const backendUrl = process.env.BACKEND_URL || '';
   const callbackUrl = `${backendUrl}/api/subscriptions/callback?plan=${plan}&user_id=${user_id}`;
-  const planLabel = plan === 'lifetime' ? '₹1,500 Lifetime' : plan === 'yearly' ? '₹150/year' : '₹15/month';
+  const planLabel = plan === 'lifetime' ? '₹1,500 Lifetime' : plan === 'yearly' ? '₹180/year' : '₹15/month';
 
   res.setHeader('Content-Type', 'text/html');
   res.send(`<!DOCTYPE html>
@@ -209,6 +229,16 @@ exports.checkoutPage = (req, res) => {
         order_id: "${order_id}", name: "My Building",
         description: "${planLabel} Subscription",
         theme: { color: "#1E3A8A" },
+        config: {
+          display: {
+            blocks: {
+              upi: { name: "Pay via UPI", instruments: [{ method: "upi" }] },
+              other: { name: "Other Methods", instruments: [{ method: "card" }, { method: "netbanking" }, { method: "wallet" }] }
+            },
+            sequence: ["block.upi", "block.other"],
+            preferences: { show_default_blocks: true }
+          }
+        },
         handler: function(response) {
           document.getElementById('status').textContent = 'Activating subscription...';
           fetch('${callbackUrl}', {
@@ -282,5 +312,30 @@ exports.paymentCallback = async (req, res) => {
   }
 
   if (error) return res.json({ success: false, error: error.message });
+
+  // Mark promo as used — get promo_id from the Razorpay order notes
+  try {
+    const orderDetails = await razorpay.orders.fetch(razorpay_order_id);
+    const promo_id = orderDetails?.notes?.promo_id;
+    if (promo_id) {
+      const { markPromoUsed } = require('./promoController');
+      await markPromoUsed(promo_id, user_id);
+      // Store promo code and paid amount on subscription
+      const { data: promo } = await supabase.from('promo_codes').select('code').eq('id', promo_id).single();
+      const paidAmountRupees = Math.round(Number(orderDetails.amount) / 100);
+      await supabase.from('subscriptions').update({
+        paid_amount: paidAmountRupees,
+        promo_code_used: promo?.code || null,
+      }).eq('user_id', user_id);
+    } else {
+      // No promo — store full plan price
+      const PLAN_PRICES = { monthly: 15, yearly: 180, lifetime: 1500 };
+      await supabase.from('subscriptions').update({
+        paid_amount: PLAN_PRICES[plan] || null,
+        promo_code_used: null,
+      }).eq('user_id', user_id);
+    }
+  } catch {}
+
   res.json({ success: true });
 };
