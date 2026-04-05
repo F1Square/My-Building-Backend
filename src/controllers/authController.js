@@ -4,6 +4,16 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const supabase = require('../supabase');
 
+// Helper: fetch active subscription for a user
+const getSubscription = async (user_id) => {
+  const { data } = await supabase
+    .from('subscriptions')
+    .select('plan, status, expires_at')
+    .eq('user_id', user_id)
+    .single();
+  return data || null;
+};
+
 const signToken = (payload) =>
   jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
 
@@ -71,9 +81,11 @@ exports.unifiedLogin = async (req, res) => {
   if (!valid) return res.status(401).json({ error: 'Invalid email or password' });
 
   const token = signToken({ id: data.id, role: data.role, name: data.name, building_id: data.building_id });
+  const subscription = await getSubscription(data.id);
   return res.json({
     token,
-    user: { id: data.id, name: data.name, email: data.email, role: data.role, building_id: data.building_id, flat_no: data.flat_no, phone: data.phone }
+    subscription,
+    user: { id: data.id, name: data.name, email: data.email, role: data.role, building_id: data.building_id, flat_no: data.flat_no, phone: data.phone, wing: data.wing, total_members: data.total_members }
   });
 };
 
@@ -115,7 +127,8 @@ exports.fixedLogin = async (req, res) => {
 
   return res.json({
     token: signToken({ id: data.id, role: 'pramukh', name: data.name, building_id: data.building_id }),
-    user: { id: data.id, name: data.name, email: data.email, role: 'pramukh', building_id: data.building_id, phone: data.phone }
+    subscription: await getSubscription(data.id),
+    user: { id: data.id, name: data.name, email: data.email, role: 'pramukh', building_id: data.building_id, phone: data.phone, wing: data.wing, total_members: data.total_members }
   });
 };
 
@@ -169,7 +182,8 @@ exports.login = async (req, res) => {
 
   res.json({
     token: signToken({ id: data.id, role: data.role, name: data.name, building_id: data.building_id }),
-    user: { id: data.id, name: data.name, email: data.email, role: data.role, building_id: data.building_id, flat_no: data.flat_no, phone: data.phone }
+    subscription: await getSubscription(data.id),
+    user: { id: data.id, name: data.name, email: data.email, role: data.role, building_id: data.building_id, flat_no: data.flat_no, phone: data.phone, wing: data.wing, total_members: data.total_members }
   });
 };
 
