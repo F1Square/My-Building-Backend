@@ -17,5 +17,6 @@ router.use('/subscriptions', require('./subscriptions'));
 router.use('/helpline', require('./helpline'));
 router.use('/expenses', require('./expenses'));
 router.use('/promos', require('./promos'));
+router.use('/complaints', require('./complaints'));
 
 module.exports = router;
