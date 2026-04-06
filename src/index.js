@@ -16,7 +16,6 @@ app.use((req, _res, next) => {
 });
 
 app.use('/api', require('./routes'));
-
 app.use('/entry', require('./routes/entry'));
 
 // Serve visitor-web static site

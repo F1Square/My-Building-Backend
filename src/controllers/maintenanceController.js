@@ -360,6 +360,8 @@ exports.checkoutPage = (req, res) => {
 </html>`);
 };
 
+const logActivity = require('../utils/activityLogger');
+
 // Razorpay callback — called via fetch from the checkout page
 exports.paymentCallback = async (req, res) => {
   const { record_id } = req.query;
@@ -376,6 +378,19 @@ exports.paymentCallback = async (req, res) => {
     .digest('hex');
 
   if (expected !== razorpay_signature) {
+    // Log failed payment attempt
+    const { data: rec } = await supabase
+      .from('maintenance_payments')
+      .select('user_id, building_id, amount, maintenance_bills(month, year), users(name, role)')
+      .eq('id', record_id).single();
+    if (rec) {
+      await logActivity(
+        { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
+        'payment_failed',
+        'maintenance',
+        { record_id, reason: 'signature_mismatch', amount: rec.amount, period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}` }
+      );
+    }
     return res.json({ success: false, error: 'Signature mismatch' });
   }
 
@@ -386,6 +401,26 @@ exports.paymentCallback = async (req, res) => {
   }).eq('id', record_id);
 
   if (error) return res.json({ success: false, error: error.message });
+
+  // Log successful payment
+  const { data: rec } = await supabase
+    .from('maintenance_payments')
+    .select('user_id, building_id, amount, total_amount, maintenance_bills(month, year, amount), users(name, role)')
+    .eq('id', record_id).single();
+  if (rec) {
+    await logActivity(
+      { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
+      'payment_completed',
+      'maintenance',
+      {
+        record_id,
+        razorpay_payment_id,
+        amount_paid: rec.total_amount || rec.amount,
+        bill_period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}`,
+        method: 'online',
+      }
+    );
+  }
 
   // Auto-add inflow to expenses module
   await addMaintenanceExpense(record_id);
@@ -433,7 +468,6 @@ exports.downloadReceipt = async (req, res) => {
   const bill = record.maintenance_bills;
   const user = record.users;
   const building = record.buildings;
-  const isCash = record.payment_method === 'cash';
 
   const doc = new PDFDocument({ margin: 50, size: 'A4' });
   res.setHeader('Content-Type', 'application/pdf');
@@ -450,11 +484,11 @@ exports.downloadReceipt = async (req, res) => {
   doc.fontSize(10).font('Helvetica');
   doc.text(`Receipt No: ${payment_record_id.slice(0, 8).toUpperCase()}`, 62, 112);
   doc.text(`Payment Date: ${new Date(record.paid_at).toLocaleDateString('en-IN')}`, 62, 126);
-  doc.text(`Method: ${isCash ? 'Cash' : 'Online (Razorpay)'}`, 300, 112);
-  if (!isCash && record.razorpay_payment_id) {
+  doc.text(`Method: Online (Razorpay)`, 300, 112);
+  if (record.razorpay_payment_id) {
     doc.text(`Razorpay ID: ${record.razorpay_payment_id}`, 300, 126);
   }
-  doc.fillColor('#16A34A').font('Helvetica-Bold').text('STATUS: PAID ✓', isCash ? 300 : 62, isCash ? 126 : 140);
+  doc.fillColor('#16A34A').font('Helvetica-Bold').text('STATUS: PAID ✓', 62, 140);
 
   // Two-column info
   doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Building', 50, 175);
@@ -495,48 +529,6 @@ exports.downloadReceipt = async (req, res) => {
   doc.text(`Generated on ${new Date().toLocaleString('en-IN')}`, 50, 393, { align: 'center', width: doc.page.width - 100 });
 
   doc.end();
-};
-
-// Pramukh/Admin: mark a user's payment as paid via cash
-exports.markCashPaid = async (req, res) => {
-  const { payment_record_id } = req.body;
-  if (!payment_record_id) return res.status(422).json({ error: 'payment_record_id is required' });
-  const isAdmin = req.user.role === 'admin';
-  const building_id = req.user.building_id;
-
-  let query = supabase
-    .from('maintenance_payments')
-    .select('id, status, user_id, building_id, maintenance_bills(month, year, amount)')
-    .eq('id', payment_record_id);
-
-  // Pramukh can only mark payments in their own building; admin can mark any
-  if (!isAdmin) query = query.eq('building_id', building_id);
-
-  const { data: record, error: recErr } = await query.single();
-
-  if (recErr || !record) return res.status(404).json({ error: 'Payment record not found' });
-  if (record.status === 'paid') return res.status(400).json({ error: 'Already marked as paid' });
-
-  const { error } = await supabase.from('maintenance_payments').update({
-    status: 'paid',
-    payment_method: 'cash',
-    paid_at: new Date().toISOString(),
-  }).eq('id', payment_record_id);
-
-  if (error) return res.status(400).json({ error: error.message });
-
-  // Auto-add inflow to expenses module
-  await addMaintenanceExpense(payment_record_id);
-
-  // Notify the user
-  await ns.notifyUser(record.user_id, {
-    title: '✅ Cash Payment Recorded',
-    body: `Your maintenance of ₹${record.maintenance_bills.amount} for ${MONTHS[record.maintenance_bills.month]} ${record.maintenance_bills.year} has been marked as paid (Cash).`,
-    type: 'payment',
-    meta: { payment_record_id }
-  });
-
-  res.json({ message: 'Marked as cash paid', payment_record_id });
 };
 
 // Pramukh/Admin: send payment reminder (with Expo push notification)

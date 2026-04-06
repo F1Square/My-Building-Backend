@@ -6,7 +6,7 @@ router.post('/', authenticate, requireRole('user', 'pramukh'), c.addVehicle);
 router.get('/mine', authenticate, requireRole('user', 'pramukh'), c.getMyVehicles);
 router.delete('/:id', authenticate, requireRole('user', 'pramukh'), c.deleteVehicle);
 router.get('/building', authenticate, requireRole('pramukh', 'admin', 'user'), c.getBuildingVehicles);
-router.post('/report', authenticate, requireRole('user', 'admin'), c.reportParking);
+router.post('/report', authenticate, requireRole('user', 'pramukh', 'admin'), c.reportParking);
 router.get('/reports', authenticate, requireRole('pramukh', 'admin', 'user'), c.getParkingReports);
 router.post('/reminder', authenticate, requireRole('pramukh', 'admin'), c.sendParkingReminder);
 // Admin: manage any vehicle

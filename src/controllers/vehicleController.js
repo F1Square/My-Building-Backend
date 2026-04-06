@@ -115,7 +115,7 @@ exports.getBuildingVehicles = async (req, res) => {
   res.json(data);
 };
 
-// User/Admin: report parking misconduct
+// User/Pramukh/Admin: report parking misconduct
 exports.reportParking = async (req, res) => {
   const { description, vehicle_number, location } = req.body;
   const { id: user_id, name } = req.user;
