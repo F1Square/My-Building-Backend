@@ -41,6 +41,21 @@ exports.markReadByTypes = async (req, res) => {
 
   res.json({ message: 'Marked as read' });
 };
+// Delete all notifications of given types for this user (permanent dismiss)
+exports.deleteByTypes = async (req, res) => {
+  const { types } = req.body;
+  if (!Array.isArray(types) || !types.length)
+    return res.status(422).json({ error: 'types array is required' });
+
+  await supabase
+    .from('notifications')
+    .delete()
+    .eq('user_id', req.user.id)
+    .in('type', types);
+
+  res.json({ message: 'Dismissed' });
+};
+
 exports.getUnreadCounts = async (req, res) => {
   const { data, error } = await supabase
     .from('notifications')

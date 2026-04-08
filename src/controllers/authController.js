@@ -80,7 +80,7 @@ exports.unifiedLogin = async (req, res) => {
   const valid = await bcrypt.compare(password, data.password_hash);
   if (!valid) return res.status(401).json({ error: 'Invalid email or password' });
 
-  const token = signToken({ id: data.id, role: data.role, name: data.name, building_id: data.building_id });
+  const token = signToken({ id: data.id, role: data.role, name: data.name, building_id: data.building_id, flat_no: data.flat_no });
   const subscription = await getSubscription(data.id);
   return res.json({
     token,

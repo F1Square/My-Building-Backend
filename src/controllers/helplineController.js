@@ -39,6 +39,30 @@ exports.addHelpline = async (req, res) => {
   res.status(201).json({ message: 'Helpline added', helpline: data });
 };
 
+// Pramukh / Admin: update helpline
+exports.updateHelpline = async (req, res) => {
+  const { id } = req.params;
+  const { profession, name, phone } = req.body;
+  const building_id = req.user.building_id;
+
+  if (!profession?.trim() || !name?.trim() || !phone?.trim())
+    return res.status(422).json({ error: 'profession, name and phone are required' });
+  if (!PHONE_RE.test(phone.trim()))
+    return res.status(422).json({ error: 'Phone must be a valid 10-digit Indian mobile number' });
+
+  let query = supabase
+    .from('helpline_numbers')
+    .update({ profession: profession.trim(), name: name.trim(), phone: phone.trim() })
+    .eq('id', id);
+
+  // Pramukh can only update their own building
+  if (req.user.role !== 'admin') query = query.eq('building_id', building_id);
+
+  const { data, error } = await query.select().single();
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Helpline updated', helpline: data });
+};
+
 // Pramukh / Admin: delete helpline
 exports.deleteHelpline = async (req, res) => {
   const { id } = req.params;

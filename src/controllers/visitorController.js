@@ -31,7 +31,8 @@ exports.addVisitor = async (req, res) => {
 // Get visitors for a building — supports ?date=YYYY-MM-DD and ?building_id=
 exports.getVisitors = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
-  const { date } = req.query; // optional YYYY-MM-DD filter
+  const { date } = req.query;
+  const isUser = req.user.role === 'user';
 
   // Admin with no building: return all visitors
   if (!building_id) {
@@ -54,6 +55,13 @@ exports.getVisitors = async (req, res) => {
     .order('created_at', { ascending: false })
     .limit(500);
 
+  // Users only see visitors that came to their own flat
+  if (isUser) {
+    const userFlat = req.user.flat_no;
+    if (!userFlat) return res.json([]); // no flat assigned, show nothing
+    q = q.eq('flat_no', userFlat);
+  }
+
   if (date) {
     q = q.gte('created_at', `${date}T00:00:00.000Z`).lte('created_at', `${date}T23:59:59.999Z`);
   }
@@ -66,7 +74,8 @@ exports.getVisitors = async (req, res) => {
 // Get distinct dates that have visitors (for calendar dots)
 exports.getVisitorDates = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
-  const { month, year } = req.query; // e.g. month=3&year=2026
+  const { month, year } = req.query;
+  const isUser = req.user.role === 'user';
 
   if (!month || !year) return res.status(422).json({ error: 'month and year are required' });
   const m = parseInt(month), y = parseInt(year);
@@ -86,10 +95,16 @@ exports.getVisitorDates = async (req, res) => {
 
   if (building_id) q = q.eq('building_id', building_id);
 
+  // Users only see dates for their own flat's visitors
+  if (isUser) {
+    const userFlat = req.user.flat_no;
+    if (!userFlat) return res.json({ dates: [] });
+    q = q.eq('flat_no', userFlat);
+  }
+
   const { data, error } = await q;
   if (error) return res.status(400).json({ error: error.message });
 
-  // Return unique date strings YYYY-MM-DD
   const dates = [...new Set(data.map((v) => v.created_at.slice(0, 10)))];
   res.json({ dates });
 };

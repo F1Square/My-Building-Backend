@@ -31,8 +31,8 @@ exports.addAnnouncement = async (req, res) => {
   await ns.notifyMembers(building_id, {
     title: `${priority === 'urgent' ? 'URGENT: ' : ''}${title}`,
     body,
-    type: 'announcement',
-    meta: { announcement_id: data.id }
+    type: priority === 'urgent' ? 'announcement_urgent' : 'announcement',
+    meta: { announcement_id: data.id, priority: priority || 'normal' }
   });
 
   res.status(201).json({ message: 'Announcement posted', announcement: data });
