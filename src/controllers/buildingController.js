@@ -170,7 +170,7 @@ exports.getBankDetails = async (req, res) => {
 exports.saveBankDetails = async (req, res) => {
   const building_id = req.user.building_id || req.body.building_id;
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
-  const { bank_name, bank_branch, bank_ifsc, bank_account } = req.body;
+  const { bank_name, bank_branch, bank_ifsc, bank_account, beneficiary_name, contact_name, contact_email, contact_mobile } = req.body;
 
   if (bank_ifsc && !IFSC_RE.test(bank_ifsc.toUpperCase().trim()))
     return res.status(422).json({ error: 'IFSC code must be 11 characters (e.g. SBIN0001234)' });
@@ -183,7 +183,14 @@ exports.saveBankDetails = async (req, res) => {
     .eq('building_id', building_id)
     .single();
 
-  const payload = { building_id, bank_name, bank_branch, bank_ifsc, bank_account, updated_at: new Date().toISOString() };
+  const payload = {
+    building_id, bank_name, bank_branch, bank_ifsc, bank_account,
+    beneficiary_name: beneficiary_name?.trim() || null,
+    contact_name: contact_name?.trim() || null,
+    contact_email: contact_email?.trim() || null,
+    contact_mobile: contact_mobile?.trim() || null,
+    updated_at: new Date().toISOString(),
+  };
 
   let error;
   if (existing) {

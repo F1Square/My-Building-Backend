@@ -361,6 +361,7 @@ exports.checkoutPage = (req, res) => {
 };
 
 const logActivity = require('../utils/activityLogger');
+const { transferToLinkedAccount } = require('./routesController');
 
 // Razorpay callback — called via fetch from the checkout page
 exports.paymentCallback = async (req, res) => {
@@ -378,7 +379,6 @@ exports.paymentCallback = async (req, res) => {
     .digest('hex');
 
   if (expected !== razorpay_signature) {
-    // Log failed payment attempt
     const { data: rec } = await supabase
       .from('maintenance_payments')
       .select('user_id, building_id, amount, maintenance_bills(month, year), users(name, role)')
@@ -402,11 +402,12 @@ exports.paymentCallback = async (req, res) => {
 
   if (error) return res.json({ success: false, error: error.message });
 
-  // Log successful payment
+  // Fetch payment record for logging + transfer
   const { data: rec } = await supabase
     .from('maintenance_payments')
     .select('user_id, building_id, amount, total_amount, maintenance_bills(month, year, amount), users(name, role)')
     .eq('id', record_id).single();
+
   if (rec) {
     await logActivity(
       { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
@@ -420,6 +421,36 @@ exports.paymentCallback = async (req, res) => {
         method: 'online',
       }
     );
+
+    // ── Razorpay Routes: transfer to society linked account ──────────────
+    const { data: bankRow } = await supabase
+      .from('building_bank_details')
+      .select('razorpay_account_id')
+      .eq('building_id', rec.building_id)
+      .single();
+
+    if (bankRow?.razorpay_account_id) {
+      const amountPaise = Math.round(Number(rec.total_amount || rec.amount) * 100);
+      const result = await transferToLinkedAccount(
+        razorpay_payment_id,
+        bankRow.razorpay_account_id,
+        amountPaise,
+        {
+          record_id,
+          building_id: rec.building_id,
+          bill_period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}`,
+        }
+      );
+      if (!result.success) {
+        console.error('[Routes] Transfer failed:', result.error);
+        // Don't fail the payment — log and continue
+      } else {
+        // Store transfer ID on the payment record
+        await supabase.from('maintenance_payments')
+          .update({ razorpay_transfer_id: result.transfer?.id })
+          .eq('id', record_id);
+      }
+    }
   }
 
   // Auto-add inflow to expenses module
