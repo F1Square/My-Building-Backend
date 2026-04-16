@@ -24,5 +24,6 @@ router.use('/complaints', require('./complaints'));
 router.use('/activity-logs', require('./activityLogs'));
 router.use('/routes', require('./routes'));
 router.use('/contacts', require('./contacts'));
+router.use('/refer', require('./refer'));
 
 module.exports = router;

@@ -153,7 +153,7 @@ exports.getPendingRequests = async (req, res) => {
   res.json(data);
 };
 
-// Pramukh/Admin: get bank details for a building
+// Admin: get bank details for a building
 exports.getBankDetails = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
@@ -166,7 +166,7 @@ exports.getBankDetails = async (req, res) => {
   res.json(data || {});
 };
 
-// Pramukh/Admin: upsert bank details for a building
+// Admin: upsert bank details for a building
 exports.saveBankDetails = async (req, res) => {
   const building_id = req.user.building_id || req.body.building_id;
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
@@ -260,6 +260,19 @@ exports.adminCreateUser = async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
   res.status(201).json({ message: 'User created', user: data });
+};
+
+// User/Pramukh: get own building info
+exports.getMyBuilding = async (req, res) => {
+  const building_id = req.user.building_id;
+  if (!building_id) return res.status(404).json({ error: 'No building associated' });
+  const { data, error } = await supabase
+    .from('buildings')
+    .select('id, name, address, society_logo, payment_method, payment_tc, created_at')
+    .eq('id', building_id)
+    .single();
+  if (error || !data) return res.status(404).json({ error: 'Building not found' });
+  res.json(data);
 };
 
 // Admin: delete a user

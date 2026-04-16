@@ -51,6 +51,7 @@ exports.createLinkedAccount = async (req, res) => {
     // Create linked account via Razorpay Routes API
     const account = await razorpay.accounts.create({
       email: contact_email,
+      phone: contact_mobile,
       profile: {
         category: profile_category || 'housing_society',
         subcategory: profile_subcategory || 'housing_society',

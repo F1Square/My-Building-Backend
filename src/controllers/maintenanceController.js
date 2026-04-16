@@ -3,6 +3,7 @@ const Razorpay = require('razorpay');
 const PDFDocument = require('pdfkit');
 const ns = require('../utils/notificationService');
 const addMaintenanceExpense = require('../utils/addMaintenanceExpense');
+const settleAdvanceCredit = require('../utils/settleAdvanceCredit');
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -65,6 +66,9 @@ exports.addBill = async (req, res) => {
       type: 'bill',
       meta: { bill_id: bill.id }
     });
+
+    // Auto-settle advance credit for members who have pre-paid
+    await settleAdvanceCredit(building_id, members, { id: bill.id, amount: parsedAmount });
   }
 
   res.status(201).json({ message: 'Bill added', bill });
@@ -132,7 +136,7 @@ exports.getPaymentRecords = async (req, res) => {
 
   let query = supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(month, year, amount, due_date, description), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone)');
+    .select('*, maintenance_bills(month, year, amount, due_date, description), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone), buildings(payment_method, payment_tc)');
 
   if (building_id) {
     query = query.eq('building_id', building_id);
@@ -145,7 +149,53 @@ exports.getPaymentRecords = async (req, res) => {
 
   const { data, error } = await query.order('created_at', { ascending: false });
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+
+  const mapped = data.map(p => {
+    // Compute the display amount: use total_amount if set, otherwise calculate
+    // bill amount + penalty if overdue
+    const billAmount = Number(p.amount);
+    const penaltyAmount = Number(p.penalty_amount || 0);
+    const dueDate = p.maintenance_bills?.due_date;
+    const isOverdue = dueDate && new Date(dueDate) < new Date();
+    const displayAmount = p.total_amount
+      ? Number(p.total_amount)
+      : billAmount + (isOverdue && penaltyAmount > 0 ? penaltyAmount : 0);
+
+    return {
+      ...p,
+      display_amount: displayAmount,
+      is_overdue: !!(isOverdue && penaltyAmount > 0),
+      building_payment_method: p.buildings?.payment_method ?? null,
+      building_payment_tc: p.buildings?.payment_tc ?? null,
+      buildings: undefined,
+    };
+  });
+  res.json(mapped);
+};
+
+// User/Pramukh: upload transaction receipt for a pending payment
+exports.uploadReceipt = async (req, res) => {
+  const { id } = req.params;
+  const { receipt_url } = req.body;
+  if (!receipt_url) return res.status(422).json({ error: 'receipt_url is required' });
+
+  const { data: record } = await supabase
+    .from('maintenance_payments')
+    .select('id, user_id, status')
+    .eq('id', id)
+    .single();
+
+  if (!record) return res.status(404).json({ error: 'Payment record not found' });
+  if (record.user_id !== req.user.id) return res.status(403).json({ error: 'Access denied' });
+  if (record.status === 'paid') return res.status(400).json({ error: 'Payment already completed' });
+
+  const { error } = await supabase
+    .from('maintenance_payments')
+    .update({ receipt_url, status: 'receipt_uploaded' })
+    .eq('id', id);
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Receipt uploaded', status: 'receipt_uploaded' });
 };
 
 // User/Pramukh: create Razorpay order + return checkout page URL (served by our backend)
