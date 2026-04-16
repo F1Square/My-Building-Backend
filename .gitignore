@@ -1,5 +1,18 @@
+# Environment — never commit secrets
 .env
-.env.example
-node_modules
+.env.*
+
+# Dependencies
+node_modules/
+
+# Sensitive / generated files
 supabase_schema.sql
-.vscode
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.*
+yarn-debug.*

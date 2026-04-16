@@ -23,5 +23,6 @@ router.use('/promos', require('./promos'));
 router.use('/complaints', require('./complaints'));
 router.use('/activity-logs', require('./activityLogs'));
 router.use('/routes', require('./routes'));
+router.use('/contacts', require('./contacts'));
 
 module.exports = router;
