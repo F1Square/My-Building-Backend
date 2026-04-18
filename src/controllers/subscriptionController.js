@@ -25,11 +25,13 @@ exports.getMySubscription = async (req, res) => {
 
 // Create Razorpay order for subscription
 exports.createOrder = async (req, res) => {
-  const { plan, promo_id } = req.body;
+  const { plan, promo_id, include_newspaper } = req.body;
   if (!PLANS[plan]) return res.status(422).json({ error: 'Invalid plan. Choose monthly, yearly or lifetime' });
 
   const planInfo = PLANS[plan];
   let amount = planInfo.amount;
+  // Add ₹3 (300 paise) for newspaper add-on
+  if (include_newspaper) amount += 300;
   let appliedPromo = null;
 
   // Apply promo discount if provided
@@ -54,7 +56,7 @@ exports.createOrder = async (req, res) => {
       amount,
       currency: 'INR',
       receipt: `sub_${req.user.id.slice(0, 20)}`,
-      notes: { user_id: req.user.id, plan, user_email: req.user.email, promo_id: promo_id || '' },
+      notes: { user_id: req.user.id, plan, user_email: req.user.email, promo_id: promo_id || '', include_newspaper: include_newspaper ? '1' : '0' },
     });
     res.json({ order_id: order.id, amount: order.amount, key: process.env.RAZORPAY_KEY_ID, plan, promo_applied: !!appliedPromo });
   } catch (err) {
@@ -187,7 +189,7 @@ exports.checkoutPage = (req, res) => {
   const { amount, key, plan, user_id } = req.query;
   const backendUrl = process.env.BACKEND_URL || '';
   const callbackUrl = `${backendUrl}/api/subscriptions/callback?plan=${plan}&user_id=${user_id}`;
-  const planLabel = plan === 'lifetime' ? '₹1,500 Lifetime' : plan === 'yearly' ? '₹180/year' : '₹15/month';
+  const planLabel = plan === 'lifetime' ? '₹1,500 Lifetime' : plan === 'yearly' ? '₹180/year' : plan === 'newspaper_addon' ? '₹3 Newspaper Add-On' : '₹15/month';
 
   res.setHeader('Content-Type', 'text/html');
   res.send(`<!DOCTYPE html>
@@ -295,6 +297,16 @@ exports.paymentCallback = async (req, res) => {
   if (expected !== razorpay_signature)
     return res.json({ success: false, error: 'Signature mismatch' });
 
+  // Handle newspaper add-on only payment
+  if (plan === 'newspaper_addon') {
+    const { error } = await supabase
+      .from('subscriptions')
+      .update({ newspaper_addon: true })
+      .eq('user_id', user_id);
+    if (error) return res.json({ success: false, error: error.message });
+    return res.json({ success: true });
+  }
+
   const now = new Date();
   const expires_at = plan === 'lifetime' ? null
     : new Date(now.getFullYear(), now.getMonth() + (PLANS[plan]?.months || 1), now.getDate()).toISOString();
@@ -312,6 +324,15 @@ exports.paymentCallback = async (req, res) => {
   }
 
   if (error) return res.json({ success: false, error: error.message });
+
+  // Activate newspaper add-on if included
+  try {
+    const orderDetails = await razorpay.orders.fetch(razorpay_order_id);
+    const include_newspaper = orderDetails?.notes?.include_newspaper === '1';
+    if (include_newspaper) {
+      await supabase.from('subscriptions').update({ newspaper_addon: true }).eq('user_id', user_id);
+    }
+  } catch {}
 
   // Mark promo as used — get promo_id from the Razorpay order notes
   try {
@@ -338,4 +359,82 @@ exports.paymentCallback = async (req, res) => {
   } catch {}
 
   res.json({ success: true });
+};
+
+// ── Newspaper Add-On ─────────────────────────────────────────────────────────
+
+const NEWSPAPER_ADDON_AMOUNT = 300; // ₹3 in paise
+
+// Create Razorpay order for ₹3 newspaper add-on
+exports.createNewspaperAddonOrder = async (req, res) => {
+  // Must have an active subscription
+  const { data: sub } = await supabase
+    .from('subscriptions')
+    .select('id, status, expires_at, newspaper_addon')
+    .eq('user_id', req.user.id)
+    .single();
+
+  if (!sub || sub.status !== 'active') {
+    return res.status(400).json({ error: 'Active subscription required to add newspaper add-on' });
+  }
+  if (sub.newspaper_addon) {
+    return res.status(400).json({ error: 'Newspaper add-on is already active' });
+  }
+
+  try {
+    const order = await razorpay.orders.create({
+      amount: NEWSPAPER_ADDON_AMOUNT,
+      currency: 'INR',
+      receipt: `news_${req.user.id.slice(0, 20)}`,
+      notes: { user_id: req.user.id, type: 'newspaper_addon' },
+    });
+    res.json({ order_id: order.id, amount: order.amount, key: process.env.RAZORPAY_KEY_ID });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create order: ' + (err.error?.description || err.message) });
+  }
+};
+
+// Callback after ₹3 newspaper add-on payment
+exports.newspaperAddonCallback = async (req, res) => {
+  const { razorpay_payment_id, razorpay_order_id, razorpay_signature, user_id } = req.body;
+
+  if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature || !user_id) {
+    return res.json({ success: false, error: 'Missing payment data' });
+  }
+
+  const expected = crypto
+    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+    .digest('hex');
+
+  if (expected !== razorpay_signature) {
+    return res.json({ success: false, error: 'Signature mismatch' });
+  }
+
+  const { error } = await supabase
+    .from('subscriptions')
+    .update({ newspaper_addon: true })
+    .eq('user_id', user_id);
+
+  if (error) return res.json({ success: false, error: error.message });
+  res.json({ success: true });
+};
+
+// Toggle newspaper add-on off (no refund — just disable)
+exports.toggleNewspaperAddon = async (req, res) => {
+  const { enable } = req.body;
+
+  if (enable) {
+    // Enabling requires payment — use createNewspaperAddonOrder instead
+    return res.status(400).json({ error: 'Use /newspaper-addon/order to enable the add-on via payment' });
+  }
+
+  // Disable
+  const { error } = await supabase
+    .from('subscriptions')
+    .update({ newspaper_addon: false })
+    .eq('user_id', req.user.id);
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Newspaper add-on disabled' });
 };

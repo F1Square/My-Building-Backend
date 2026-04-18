@@ -1,11 +1,12 @@
 const supabase = require('../supabase');
 
-// Get notifications for logged-in user
+// Get notifications for logged-in user (unread only)
 exports.getNotifications = async (req, res) => {
   const { data, error } = await supabase
     .from('notifications')
     .select('*')
     .eq('user_id', req.user.id)
+    .eq('is_read', false)
     .order('created_at', { ascending: false })
     .limit(50);
 

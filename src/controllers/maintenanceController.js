@@ -13,99 +13,317 @@ const razorpay = new Razorpay({
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
-// Pramukh/Admin: add monthly maintenance bill
+// Pramukh/Admin: add monthly maintenance bill (category-aware)
 exports.addBill = async (req, res) => {
-  const { amount, month, year, due_date, description, penalty_amount } = req.body;
+  const {
+    amount, month, year, due_date, description, penalty_amount,
+    category = 'maintenance',
+    amount_mode,
+    targeting_mode = 'building_wide',
+    flat_amounts,      // [{ user_id, amount }] for flat_wise
+    targeted_user_ids, // [uuid] for targeted special bills
+  } = req.body;
   const building_id = req.user.building_id || req.body.building_id;
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
-  if (!amount || !month || !year) return res.status(422).json({ error: 'amount, month and year are required' });
 
-  const parsedAmount = parseFloat(amount);
-  if (isNaN(parsedAmount) || parsedAmount <= 0) return res.status(422).json({ error: 'amount must be a positive number' });
-  if (parsedAmount > 9999999) return res.status(422).json({ error: 'amount is too large' });
+  // Validate category
+  const VALID_CATEGORIES = ['maintenance', 'water_meter', 'special'];
+  if (!VALID_CATEGORIES.includes(category)) return res.status(422).json({ error: 'category must be maintenance, water_meter, or special' });
 
-  const parsedMonth = parseInt(month);
-  if (isNaN(parsedMonth) || parsedMonth < 1 || parsedMonth > 12) return res.status(422).json({ error: 'month must be between 1 and 12' });
+  // Validate targeting_mode
+  const VALID_TARGETING = ['building_wide', 'targeted'];
+  if (!VALID_TARGETING.includes(targeting_mode)) return res.status(422).json({ error: 'targeting_mode must be building_wide or targeted' });
 
-  const parsedYear = parseInt(year);
-  if (isNaN(parsedYear) || parsedYear < 2000 || parsedYear > 2100) return res.status(422).json({ error: 'year must be a valid year' });
-
-  if (due_date && isNaN(Date.parse(due_date))) return res.status(422).json({ error: 'due_date must be a valid date' });
-  if (description && description.trim().length > 500) return res.status(422).json({ error: 'description must not exceed 500 characters' });
-
-  const parsedPenalty = penalty_amount ? parseFloat(penalty_amount) : 0;
-  if (isNaN(parsedPenalty) || parsedPenalty < 0) return res.status(422).json({ error: 'penalty_amount must be a non-negative number' });
-
-  const { data: bill, error } = await supabase
-    .from('maintenance_bills')
-    .insert({
-      building_id, amount: parsedAmount, month, year, due_date, description,
-      penalty_amount: parsedPenalty,
-      created_by: req.user.id
-    })
-    .select().single();
-
-  if (error) return res.status(400).json({ error: error.message });
-
-  const { data: members } = await supabase
-    .from('users').select('id').eq('building_id', building_id).in('role', ['user', 'pramukh']).eq('status', 'approved');
-
-  if (members?.length) {
-    await supabase.from('maintenance_payments').insert(
-      members.map((m) => ({
-        bill_id: bill.id, user_id: m.id, building_id,
-        amount: parsedAmount,
-        penalty_amount: parsedPenalty,
-        total_amount: parsedAmount, // penalty applied only after due date
-        status: 'pending'
-      }))
-    );
-    await ns.notifyMembers(building_id, {
-      title: '🧾 Maintenance Bill',
-      body: `New bill of ₹${parsedAmount} for ${MONTHS[month]} ${year}. Due: ${due_date || 'N/A'}${parsedPenalty > 0 ? `. Penalty: ₹${parsedPenalty} after due date` : ''}`,
-      type: 'bill',
-      meta: { bill_id: bill.id }
-    });
-
-    // Auto-settle advance credit for members who have pre-paid
-    await settleAdvanceCredit(building_id, members, { id: bill.id, amount: parsedAmount });
+  // Reject penalty_amount on non-maintenance bills
+  if (penalty_amount && category !== 'maintenance') {
+    return res.status(422).json({ error: 'penalty_amount is only applicable to maintenance bills' });
   }
 
-  res.status(201).json({ message: 'Bill added', bill });
+  // Determine effective amount_mode
+  const effectiveAmountMode = category === 'water_meter' ? 'flat_wise' : (amount_mode || 'uniform');
+  const VALID_AMOUNT_MODES = ['uniform', 'flat_wise'];
+  if (!VALID_AMOUNT_MODES.includes(effectiveAmountMode)) return res.status(422).json({ error: 'amount_mode must be uniform or flat_wise' });
+
+  // Validate due_date
+  if (!due_date) return res.status(422).json({ error: 'due_date is required' });
+  if (isNaN(Date.parse(due_date))) return res.status(422).json({ error: 'due_date must be a valid date' });
+  if (description && description.trim().length > 500) return res.status(422).json({ error: 'description must not exceed 500 characters' });
+
+  // ── Maintenance: uniform, building-wide ──────────────────────────────────
+  if (category === 'maintenance') {
+    if (!amount || !month || !year) return res.status(422).json({ error: 'amount, month and year are required' });
+    const parsedAmount = parseFloat(amount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) return res.status(422).json({ error: 'amount must be a positive number' });
+    if (parsedAmount > 9999999) return res.status(422).json({ error: 'amount is too large' });
+    const parsedMonth = parseInt(month);
+    if (isNaN(parsedMonth) || parsedMonth < 1 || parsedMonth > 12) return res.status(422).json({ error: 'month must be between 1 and 12' });
+    const parsedYear = parseInt(year);
+    if (isNaN(parsedYear) || parsedYear < 2000 || parsedYear > 2100) return res.status(422).json({ error: 'year must be a valid year' });
+    const parsedPenalty = penalty_amount ? parseFloat(penalty_amount) : 0;
+    if (isNaN(parsedPenalty) || parsedPenalty < 0) return res.status(422).json({ error: 'penalty_amount must be a non-negative number' });
+
+    const { data: bill, error } = await supabase
+      .from('maintenance_bills')
+      .insert({
+        building_id, amount: parsedAmount, month: parsedMonth, year: parsedYear,
+        due_date, description, penalty_amount: parsedPenalty,
+        category: 'maintenance', amount_mode: 'uniform', targeting_mode: 'building_wide',
+        created_by: req.user.id,
+      })
+      .select().single();
+    if (error) return res.status(400).json({ error: error.message });
+
+    const { data: members } = await supabase
+      .from('users').select('id').eq('building_id', building_id).in('role', ['user', 'pramukh']).eq('status', 'approved');
+
+    if (members?.length) {
+      await supabase.from('maintenance_payments').insert(
+        members.map((m) => ({
+          bill_id: bill.id, user_id: m.id, building_id,
+          amount: parsedAmount, flat_amount: parsedAmount,
+          penalty_amount: parsedPenalty, total_amount: parsedAmount,
+          status: 'pending', category: 'maintenance',
+        }))
+      );
+      await ns.notifyMembers(building_id, {
+        title: '🧾 Maintenance Bill',
+        body: `New bill of ₹${parsedAmount} for ${MONTHS[parsedMonth]} ${parsedYear}. Due: ${due_date}${parsedPenalty > 0 ? `. Penalty: ₹${parsedPenalty} after due date` : ''}`,
+        type: 'bill', meta: { bill_id: bill.id },
+      });
+      await settleAdvanceCredit(building_id, members, { id: bill.id, amount: parsedAmount });
+    }
+    return res.status(201).json({ message: 'Bill added', bill });
+  }
+
+  // ── Water Meter: flat_wise or uniform, building-wide ────────────────────────
+  if (category === 'water_meter') {
+    if (effectiveAmountMode === 'uniform') {
+      const parsedAmount = parseFloat(amount);
+      if (isNaN(parsedAmount) || parsedAmount <= 0) return res.status(422).json({ error: 'amount must be a positive number' });
+
+      const { data: bill, error } = await supabase
+        .from('maintenance_bills')
+        .insert({
+          building_id, amount: parsedAmount, due_date, description: description || 'Water Meter Bill',
+          category: 'water_meter', amount_mode: 'uniform', targeting_mode: 'building_wide',
+          created_by: req.user.id,
+        })
+        .select().single();
+      if (error) return res.status(400).json({ error: error.message });
+
+      const { data: members } = await supabase
+        .from('users').select('id').eq('building_id', building_id).in('role', ['user', 'pramukh']).eq('status', 'approved');
+
+      if (members?.length) {
+        await supabase.from('maintenance_payments').insert(
+          members.map((m) => ({
+            bill_id: bill.id, user_id: m.id, building_id,
+            amount: parsedAmount, flat_amount: parsedAmount,
+            status: 'pending', category: 'water_meter',
+          }))
+        );
+        await ns.notifyMembers(building_id, {
+          title: '💧 Water Meter Bill',
+          body: `Water bill of ₹${parsedAmount} is due by ${due_date}.`,
+          type: 'bill', meta: { bill_id: bill.id },
+        });
+      }
+      return res.status(201).json({ message: 'Water meter bill added', bill });
+    }
+
+    // flat_wise
+    if (!flat_amounts || !Array.isArray(flat_amounts) || flat_amounts.length === 0)
+      return res.status(422).json({ error: 'flat_amounts is required for water_meter bills' });
+
+    for (const entry of flat_amounts) {
+      const amt = parseFloat(entry.amount);
+      if (isNaN(amt) || amt <= 0)
+        return res.status(422).json({ error: `amount for flat ${entry.flat_no || entry.user_id} must be a positive number` });
+    }
+
+    const { data: bill, error } = await supabase
+      .from('maintenance_bills')
+      .insert({
+        building_id, amount: 0, due_date, description: description || 'Water Meter Bill',
+        category: 'water_meter', amount_mode: 'flat_wise', targeting_mode: 'building_wide',
+        created_by: req.user.id,
+      })
+      .select().single();
+    if (error) return res.status(400).json({ error: error.message });
+
+    await supabase.from('maintenance_payments').insert(
+      flat_amounts.map((entry) => ({
+        bill_id: bill.id, user_id: entry.user_id, building_id,
+        amount: parseFloat(entry.amount), flat_amount: parseFloat(entry.amount),
+        status: 'pending', category: 'water_meter',
+      }))
+    );
+
+    for (const entry of flat_amounts) {
+      await supabase.from('notifications').insert({
+        user_id: entry.user_id,
+        title: '💧 Water Meter Bill',
+        body: `Your water bill of ₹${entry.amount} is due by ${due_date}.`,
+        type: 'bill', meta: { bill_id: bill.id },
+      });
+    }
+    return res.status(201).json({ message: 'Water meter bill added', bill });
+  }
+
+  // ── Special: uniform or flat_wise, building-wide or targeted ────────────
+  if (category === 'special') {
+    if (!description) return res.status(422).json({ error: 'description is required for special bills' });
+
+    // Determine target residents
+    let targetMembers;
+    if (targeting_mode === 'targeted') {
+      if (!targeted_user_ids || !Array.isArray(targeted_user_ids) || targeted_user_ids.length === 0)
+        return res.status(422).json({ error: 'At least one flat must be selected' });
+      const { data } = await supabase
+        .from('users').select('id').in('id', targeted_user_ids).eq('building_id', building_id).eq('status', 'approved');
+      targetMembers = data || [];
+    } else {
+      const { data } = await supabase
+        .from('users').select('id').eq('building_id', building_id).in('role', ['user', 'pramukh']).eq('status', 'approved');
+      targetMembers = data || [];
+    }
+
+    if (effectiveAmountMode === 'uniform') {
+      const parsedAmount = parseFloat(amount);
+      if (isNaN(parsedAmount) || parsedAmount <= 0) return res.status(422).json({ error: 'amount must be a positive number' });
+
+      const { data: bill, error } = await supabase
+        .from('maintenance_bills')
+        .insert({
+          building_id, amount: parsedAmount, due_date, description,
+          category: 'special', amount_mode: 'uniform', targeting_mode,
+          created_by: req.user.id,
+        })
+        .select().single();
+      if (error) return res.status(400).json({ error: error.message });
+
+      if (targetMembers.length) {
+        await supabase.from('maintenance_payments').insert(
+          targetMembers.map((m) => ({
+            bill_id: bill.id, user_id: m.id, building_id,
+            amount: parsedAmount, flat_amount: parsedAmount,
+            status: 'pending', category: 'special',
+          }))
+        );
+        await ns.notifyMembers(building_id, {
+          title: '📋 Special Bill',
+          body: `${description}: ₹${parsedAmount} due by ${due_date}.`,
+          type: 'bill', meta: { bill_id: bill.id },
+        }, targeting_mode === 'targeted' ? targetMembers.map(m => m.id) : null);
+      }
+      return res.status(201).json({ message: 'Special bill added', bill });
+    }
+
+    // flat_wise special
+    if (!flat_amounts || !Array.isArray(flat_amounts) || flat_amounts.length === 0)
+      return res.status(422).json({ error: 'flat_amounts is required for flat_wise special bills' });
+    for (const entry of flat_amounts) {
+      const amt = parseFloat(entry.amount);
+      if (isNaN(amt) || amt <= 0)
+        return res.status(422).json({ error: `amount for flat ${entry.flat_no || entry.user_id} must be a positive number` });
+    }
+
+    const { data: bill, error } = await supabase
+      .from('maintenance_bills')
+      .insert({
+        building_id, amount: 0, due_date, description,
+        category: 'special', amount_mode: 'flat_wise', targeting_mode,
+        created_by: req.user.id,
+      })
+      .select().single();
+    if (error) return res.status(400).json({ error: error.message });
+
+    await supabase.from('maintenance_payments').insert(
+      flat_amounts.map((entry) => ({
+        bill_id: bill.id, user_id: entry.user_id, building_id,
+        amount: parseFloat(entry.amount), flat_amount: parseFloat(entry.amount),
+        status: 'pending', category: 'special',
+      }))
+    );
+    for (const entry of flat_amounts) {
+      await supabase.from('notifications').insert({
+        user_id: entry.user_id,
+        title: '📋 Special Bill',
+        body: `${description}: ₹${entry.amount} due by ${due_date}.`,
+        type: 'bill', meta: { bill_id: bill.id },
+      });
+    }
+    return res.status(201).json({ message: 'Special bill added', bill });
+  }
+
+  res.status(422).json({ error: 'Invalid category' });
 };
 
-// Pramukh/Admin: update an existing bill (penalty, description, due_date)
+// Admin: delete a bill and all its payment records
+exports.deleteBill = async (req, res) => {
+  const { id } = req.params;
+  const { data: bill } = await supabase.from('maintenance_bills').select('id').eq('id', id).single();
+  if (!bill) return res.status(404).json({ error: 'Bill not found' });
+
+  // Delete payment records first (FK constraint)
+  await supabase.from('maintenance_payments').delete().eq('bill_id', id);
+  const { error } = await supabase.from('maintenance_bills').delete().eq('id', id);
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Bill deleted' });
+};
+
+// Pramukh/Admin: update an existing bill (penalty, description, due_date, amount)
 exports.updateBill = async (req, res) => {
-  const { bill_id, penalty_amount, description, due_date } = req.body;
+  const { bill_id, penalty_amount, description, due_date, amount } = req.body;
   if (!bill_id) return res.status(422).json({ error: 'bill_id is required' });
 
   const { data: bill } = await supabase.from('maintenance_bills').select('*').eq('id', bill_id).single();
   if (!bill) return res.status(404).json({ error: 'Bill not found' });
 
-  // Pramukh can only edit their own building
   if (req.user.role === 'pramukh' && bill.building_id !== req.user.building_id)
     return res.status(403).json({ error: 'Access denied' });
 
   const updates = {};
+  if (description !== undefined) updates.description = description?.trim();
+  if (due_date !== undefined) updates.due_date = due_date || null;
+
+  if (amount !== undefined) {
+    const a = parseFloat(amount);
+    if (isNaN(a) || a <= 0) return res.status(422).json({ error: 'amount must be a positive number' });
+    updates.amount = a;
+  }
+
   if (penalty_amount !== undefined) {
+    if (bill.category && bill.category !== 'maintenance')
+      return res.status(422).json({ error: 'penalty_amount is only applicable to maintenance bills' });
     const p = parseFloat(penalty_amount);
     if (isNaN(p) || p < 0) return res.status(422).json({ error: 'penalty_amount must be non-negative' });
     updates.penalty_amount = p;
   }
-  if (description !== undefined) updates.description = description?.trim();
-  if (due_date !== undefined) updates.due_date = due_date || null;
 
-  // Only set is_edited/updated_at if we have something to update
   if (Object.keys(updates).length > 0) {
     updates.is_edited = true;
     updates.updated_at = new Date().toISOString();
+    // Only store edited_by for pramukh — admin edits are silent
+    if (req.user.role === 'pramukh') {
+      updates.edited_by = req.user.id;
+    } else {
+      updates.edited_by = null; // admin: clear any previous pramukh edit attribution
+    }
   }
 
   const { data: updated, error } = await supabase
     .from('maintenance_bills').update(updates).eq('id', bill_id).select().single();
   if (error) return res.status(400).json({ error: error.message });
 
-  // Update pending payments' penalty_amount too
+  // Sync pending payment amounts if base amount changed
+  if (amount !== undefined) {
+    await supabase.from('maintenance_payments')
+      .update({ amount: updates.amount, flat_amount: updates.amount })
+      .eq('bill_id', bill_id)
+      .eq('status', 'pending');
+  }
+
   if (penalty_amount !== undefined) {
     await supabase.from('maintenance_payments')
       .update({ penalty_amount: updates.penalty_amount })
@@ -119,9 +337,12 @@ exports.updateBill = async (req, res) => {
 // Get all bills for a building
 exports.getBills = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
+  const { category } = req.query;
 
-  let query = supabase.from('maintenance_bills').select('*');
+  let query = supabase.from('maintenance_bills')
+    .select('*, editor:edited_by(name)');
   if (building_id) query = query.eq('building_id', building_id);
+  if (category) query = query.eq('category', category);
 
   const { data, error } = await query.order('created_at', { ascending: false });
   if (error) return res.status(400).json({ error: error.message });
@@ -130,41 +351,38 @@ exports.getBills = async (req, res) => {
 
 // Get payment records (pramukh sees all in building, user sees own, admin sees all)
 // Pass ?mine=true to always return only the current user's own records
+// Pass ?category= to filter by billing category
 exports.getPaymentRecords = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
   const mineOnly = req.query.mine === 'true';
+  const { category } = req.query;
 
   let query = supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(month, year, amount, due_date, description), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone), buildings(payment_method, payment_tc)');
+    .select('*, maintenance_bills(month, year, amount, due_date, description, category, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone), buildings(payment_method, payment_tc)');
 
-  if (building_id) {
-    query = query.eq('building_id', building_id);
-  }
-
-  // Always filter to own records if: role is user, OR ?mine=true is passed
-  if (req.user.role === 'user' || mineOnly) {
-    query = query.eq('user_id', req.user.id);
-  }
+  if (building_id) query = query.eq('building_id', building_id);
+  if (req.user.role === 'user' || mineOnly) query = query.eq('user_id', req.user.id);
+  if (category) query = query.eq('category', category);
 
   const { data, error } = await query.order('created_at', { ascending: false });
   if (error) return res.status(400).json({ error: error.message });
 
   const mapped = data.map(p => {
-    // Compute the display amount: use total_amount if set, otherwise calculate
-    // bill amount + penalty if overdue
     const billAmount = Number(p.amount);
     const penaltyAmount = Number(p.penalty_amount || 0);
     const dueDate = p.maintenance_bills?.due_date;
     const isOverdue = dueDate && new Date(dueDate) < new Date();
+    // Only apply penalty for maintenance category
+    const isMaintenance = (p.category || p.maintenance_bills?.category || 'maintenance') === 'maintenance';
     const displayAmount = p.total_amount
       ? Number(p.total_amount)
-      : billAmount + (isOverdue && penaltyAmount > 0 ? penaltyAmount : 0);
+      : billAmount + (isMaintenance && isOverdue && penaltyAmount > 0 ? penaltyAmount : 0);
 
     return {
       ...p,
       display_amount: displayAmount,
-      is_overdue: !!(isOverdue && penaltyAmount > 0),
+      is_overdue: !!(isMaintenance && isOverdue && penaltyAmount > 0),
       building_payment_method: p.buildings?.payment_method ?? null,
       building_payment_tc: p.buildings?.payment_tc ?? null,
       buildings: undefined,
@@ -612,7 +830,139 @@ exports.downloadReceipt = async (req, res) => {
   doc.end();
 };
 
-// Pramukh/Admin: send payment reminder (with Expo push notification)
+// Pramukh/Admin: generate PDF or Excel report for a bill
+exports.getReport = async (req, res) => {
+  const { bill_id } = req.params;
+  const { format = 'pdf' } = req.query;
+
+  if (!['pdf', 'excel'].includes(format))
+    return res.status(400).json({ error: 'format must be pdf or excel' });
+
+  const { data: bill } = await supabase
+    .from('maintenance_bills')
+    .select('*, buildings(name, address)')
+    .eq('id', bill_id).single();
+  if (!bill) return res.status(404).json({ error: 'Bill not found' });
+
+  // Scope check
+  if (req.user.role === 'pramukh' && bill.building_id !== req.user.building_id)
+    return res.status(403).json({ error: 'Access denied' });
+
+  const { data: payments } = await supabase
+    .from('maintenance_payments')
+    .select('*, users!maintenance_payments_user_id_fkey(name, flat_no, wing)')
+    .eq('bill_id', bill_id)
+    .order('created_at', { ascending: true });
+
+  const rows = (payments || []).map(p => ({
+    flat_no: p.users?.flat_no || '—',
+    wing: p.users?.wing || '—',
+    name: p.users?.name || '—',
+    amount: Number(p.flat_amount || p.amount),
+    status: p.status === 'paid' ? 'Paid' : 'Pending',
+    paid_at: p.paid_at ? new Date(p.paid_at).toLocaleDateString('en-IN') : '—',
+  }));
+
+  const categoryLabel = { maintenance: 'Maintenance Bill', water_meter: 'Water Meter Bill', special: 'Special Bill' }[bill.category || 'maintenance'] || 'Bill';
+  const periodLabel = bill.month ? `${MONTHS[bill.month]} ${bill.year}` : (bill.description || '');
+  const buildingName = bill.buildings?.name || 'Building';
+
+  if (format === 'excel') {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Report');
+
+    // Title rows
+    ws.mergeCells('A1:F1');
+    ws.getCell('A1').value = `${buildingName} — ${categoryLabel}`;
+    ws.getCell('A1').font = { bold: true, size: 14 };
+    ws.mergeCells('A2:F2');
+    ws.getCell('A2').value = periodLabel ? `Period: ${periodLabel}` : `Due: ${bill.due_date || '—'}`;
+    ws.getCell('A2').font = { size: 11, color: { argb: 'FF6B7280' } };
+
+    // Header row
+    const header = ws.addRow(['Flat No.', 'Wing', 'Resident Name', 'Amount (₹)', 'Status', 'Payment Date']);
+    header.font = { bold: true };
+    header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8EEF9' } };
+
+    // Data rows
+    rows.forEach(r => {
+      const row = ws.addRow([r.flat_no, r.wing, r.name, r.amount, r.status, r.paid_at]);
+      if (r.status === 'Paid') {
+        row.getCell(5).font = { color: { argb: 'FF16A34A' }, bold: true };
+      } else {
+        row.getCell(5).font = { color: { argb: 'FFDC2626' } };
+      }
+    });
+
+    // Auto-width
+    ws.columns.forEach(col => {
+      let max = 10;
+      col.eachCell({ includeEmpty: true }, cell => {
+        const len = cell.value ? String(cell.value).length : 0;
+        if (len > max) max = len;
+      });
+      col.width = max + 2;
+    });
+
+    const filename = `report_${bill_id.slice(0, 8)}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+    await wb.xlsx.write(res);
+    return res.end();
+  }
+
+  // PDF
+  const doc = new PDFDocument({ margin: 50, size: 'A4' });
+  const filename = `report_${bill_id.slice(0, 8)}.pdf`;
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+  doc.pipe(res);
+
+  // Header band
+  doc.rect(0, 0, doc.page.width, 80).fill('#1E3A8A');
+  doc.fillColor('#fff').fontSize(22).font('Helvetica-Bold').text(buildingName, 50, 20);
+  doc.fontSize(11).font('Helvetica').text(`${categoryLabel} — Collection Report`, 50, 48);
+
+  // Meta
+  doc.fillColor('#111827').fontSize(10).font('Helvetica');
+  doc.text(`Period: ${periodLabel || '—'}`, 50, 96);
+  doc.text(`Due Date: ${bill.due_date || '—'}`, 250, 96);
+  const paidCount = rows.filter(r => r.status === 'Paid').length;
+  doc.text(`Paid: ${paidCount} / ${rows.length}`, 420, 96);
+
+  // Table header
+  const tableTop = 120;
+  doc.rect(50, tableTop, doc.page.width - 100, 24).fill('#F3F4F6');
+  doc.fillColor('#111827').font('Helvetica-Bold').fontSize(10);
+  doc.text('Flat', 58, tableTop + 7);
+  doc.text('Wing', 100, tableTop + 7);
+  doc.text('Resident', 145, tableTop + 7);
+  doc.text('Amount', 310, tableTop + 7);
+  doc.text('Status', 390, tableTop + 7);
+  doc.text('Paid On', 460, tableTop + 7);
+
+  let y = tableTop + 24;
+  rows.forEach((r, i) => {
+    if (i % 2 === 0) doc.rect(50, y, doc.page.width - 100, 22).fill('#FAFAFA');
+    doc.fillColor('#374151').font('Helvetica').fontSize(9);
+    doc.text(r.flat_no, 58, y + 6);
+    doc.text(r.wing, 100, y + 6);
+    doc.text(r.name, 145, y + 6, { width: 155, ellipsis: true });
+    doc.text(`₹${r.amount.toLocaleString('en-IN')}`, 310, y + 6);
+    doc.fillColor(r.status === 'Paid' ? '#16A34A' : '#DC2626').font('Helvetica-Bold');
+    doc.text(r.status, 390, y + 6);
+    doc.fillColor('#374151').font('Helvetica');
+    doc.text(r.paid_at, 460, y + 6);
+    y += 22;
+    if (y > doc.page.height - 80) { doc.addPage(); y = 50; }
+  });
+
+  // Footer
+  doc.fillColor('#9CA3AF').font('Helvetica').fontSize(9);
+  doc.text(`Generated on ${new Date().toLocaleString('en-IN')}`, 50, doc.page.height - 40, { align: 'center', width: doc.page.width - 100 });
+  doc.end();
+};
 exports.sendReminder = async (req, res) => {
   const { user_id, bill_id } = req.body;
   const building_id = req.user.building_id || req.body.building_id;

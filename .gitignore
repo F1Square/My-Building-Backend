@@ -7,6 +7,7 @@ node_modules/
 
 # Sensitive / generated files
 supabase_schema.sql
+.kiro/
 
 # Editor
 .vscode/
