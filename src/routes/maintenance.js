@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const { authenticate, requireRole } = require('../middleware/auth');
+const { singleImageUpload, requireFile } = require('../middleware/imageUpload');
 const c = require('../controllers/maintenanceController');
 const c2 = require('../controllers/advancePaymentController');
 
@@ -9,6 +10,15 @@ router.delete('/bills/:id', authenticate, requireRole('admin'), c.deleteBill);
 router.get('/bills', authenticate, c.getBills);
 router.get('/payments', authenticate, c.getPaymentRecords);
 router.patch('/payments/:id/receipt', authenticate, requireRole('user', 'pramukh'), c.uploadReceipt);
+
+// Upload receipt image endpoint
+router.post('/upload-receipt', 
+  authenticate, 
+  requireRole('user', 'pramukh'), 
+  ...singleImageUpload('receipt'),
+  requireFile,
+  c.uploadReceiptImage
+);
 router.post('/pay/order', authenticate, requireRole('user', 'pramukh'), c.createPaymentOrder);
 router.get('/pay/checkout/:order_id', c.checkoutPage);   // serves HTML page — no auth (opened in browser)
 router.post('/pay/callback', c.paymentCallback);          // called via fetch from checkout page

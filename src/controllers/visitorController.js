@@ -1,5 +1,41 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { uploadImage } = require('../utils/imageUploadHelper');
+const { singleImageUpload, requireFile } = require('../middleware/imageUpload');
+
+// Upload visitor photo to Cloudinary
+exports.uploadVisitorPhoto = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'No image file provided',
+        code: 'MISSING_FILE'
+      });
+    }
+
+    // Upload image to Cloudinary
+    const result = await uploadImage(req.file.buffer, {
+      folder: 'visitors'
+    });
+
+    res.json({
+      success: true,
+      photo_url: result.secure_url,
+      public_id: result.public_id,
+      width: result.width,
+      height: result.height,
+      format: result.format
+    });
+  } catch (error) {
+    console.error('Visitor photo upload error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: error.message || 'Failed to upload photo',
+      code: 'UPLOAD_FAILED'
+    });
+  }
+};
 
 // Watchman: log a visitor
 exports.addVisitor = async (req, res) => {

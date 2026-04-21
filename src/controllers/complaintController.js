@@ -1,4 +1,39 @@
 const supabase = require('../supabase');
+const { uploadImage } = require('../utils/imageUploadHelper');
+
+// Upload complaint attachment to Cloudinary
+exports.uploadComplaintAttachment = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'No attachment provided',
+        code: 'MISSING_FILE'
+      });
+    }
+
+    // Upload image to Cloudinary
+    const result = await uploadImage(req.file.buffer, {
+      folder: 'complaints'
+    });
+
+    res.json({
+      success: true,
+      photo_url: result.secure_url,
+      public_id: result.public_id,
+      width: result.width,
+      height: result.height,
+      format: result.format
+    });
+  } catch (error) {
+    console.error('Complaint attachment upload error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: error.message || 'Failed to upload attachment',
+      code: 'UPLOAD_FAILED'
+    });
+  }
+};
 
 // User/Pramukh: create a complaint
 exports.createComplaint = async (req, res) => {

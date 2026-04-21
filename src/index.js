@@ -4,6 +4,31 @@ const cors = require('cors');
 const path = require('path');
 const supabase = require('./supabase');
 
+// Validate required environment variables
+function validateEnvironmentVariables() {
+  const requiredVars = [
+    'SUPABASE_URL',
+    'SUPABASE_SERVICE_KEY',
+    'JWT_SECRET',
+    'CLOUDINARY_CLOUD_NAME',
+    'CLOUDINARY_API_KEY',
+    'CLOUDINARY_API_SECRET'
+  ];
+
+  const missingVars = requiredVars.filter(varName => !process.env[varName]);
+  
+  if (missingVars.length > 0) {
+    console.error('❌ Missing required environment variables:', missingVars.join(', '));
+    console.error('Please check your .env file and ensure all required variables are set.');
+    process.exit(1);
+  }
+  
+  console.log('✅ All required environment variables are present');
+}
+
+// Validate environment variables on startup
+validateEnvironmentVariables();
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));

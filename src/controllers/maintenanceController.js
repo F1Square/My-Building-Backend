@@ -4,6 +4,7 @@ const PDFDocument = require('pdfkit');
 const ns = require('../utils/notificationService');
 const addMaintenanceExpense = require('../utils/addMaintenanceExpense');
 const settleAdvanceCredit = require('../utils/settleAdvanceCredit');
+const { uploadImage } = require('../utils/imageUploadHelper');
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -389,6 +390,94 @@ exports.getPaymentRecords = async (req, res) => {
     };
   });
   res.json(mapped);
+};
+
+// Upload receipt image to Cloudinary
+exports.uploadReceiptImage = async (req, res) => {
+  try {
+    const { payment_record_id } = req.body;
+    
+    if (!req.file) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'No receipt image provided',
+        code: 'MISSING_FILE'
+      });
+    }
+
+    if (!payment_record_id) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'payment_record_id is required',
+        code: 'MISSING_PAYMENT_ID'
+      });
+    }
+
+    // Verify payment record belongs to user
+    const { data: record } = await supabase
+      .from('maintenance_payments')
+      .select('id, user_id, status')
+      .eq('id', payment_record_id)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (!record) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Payment record not found',
+        code: 'RECORD_NOT_FOUND'
+      });
+    }
+
+    if (record.status === 'paid') {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Payment already completed',
+        code: 'ALREADY_PAID'
+      });
+    }
+
+    // Upload image to Cloudinary
+    const result = await uploadImage(req.file.buffer, {
+      folder: 'receipts',
+      publicId: `receipt_${payment_record_id}`
+    });
+
+    // Update payment record with receipt URL
+    const { error } = await supabase
+      .from('maintenance_payments')
+      .update({ 
+        receipt_url: result.secure_url,
+        status: 'receipt_uploaded'
+      })
+      .eq('id', payment_record_id);
+
+    if (error) {
+      console.error('Database update error:', error);
+      return res.status(500).json({ 
+        success: false,
+        error: 'Failed to save receipt reference',
+        code: 'DATABASE_ERROR'
+      });
+    }
+
+    res.json({
+      success: true,
+      receipt_url: result.secure_url,
+      public_id: result.public_id,
+      status: 'receipt_uploaded',
+      width: result.width,
+      height: result.height,
+      format: result.format
+    });
+  } catch (error) {
+    console.error('Receipt upload error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: error.message || 'Failed to upload receipt',
+      code: 'UPLOAD_FAILED'
+    });
+  }
 };
 
 // User/Pramukh: upload transaction receipt for a pending payment

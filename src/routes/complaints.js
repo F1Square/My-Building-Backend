@@ -1,9 +1,19 @@
 const router = require('express').Router();
 const { authenticate, requireRole } = require('../middleware/auth');
+const { singleImageUpload, requireFile } = require('../middleware/imageUpload');
 const c = require('../controllers/complaintController');
 
 // User/Pramukh: create complaint
 router.post('/', authenticate, requireRole('user', 'pramukh'), c.createComplaint);
+
+// Upload complaint attachment endpoint
+router.post('/upload-attachment', 
+  authenticate, 
+  requireRole('user', 'pramukh'), 
+  ...singleImageUpload('attachment'),
+  requireFile,
+  c.uploadComplaintAttachment
+);
 
 // User: my complaints only
 router.get('/my', authenticate, requireRole('user', 'pramukh'), c.getMyComplaints);
