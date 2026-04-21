@@ -19,4 +19,10 @@ router.post('/newspaper-addon', authenticate, requireRole('user', 'pramukh'), c.
 router.post('/newspaper-addon/order', authenticate, requireRole('user', 'pramukh'), c.createNewspaperAddonOrder);
 router.post('/newspaper-addon/callback', c.newspaperAddonCallback);
 
+// Validate promo code (web-friendly alias)
+router.post('/validate-promo', authenticate, c.validatePromoCode);
+
+// Upgrade plan
+router.post('/upgrade', authenticate, requireRole('user', 'pramukh'), c.upgradePlan);
+
 module.exports = router;

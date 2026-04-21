@@ -288,3 +288,58 @@ exports.adminDeleteUser = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
   res.json({ message: 'User deleted' });
 };
+
+// ── Bank Details ─────────────────────────────────────────────────────────────
+
+// GET /buildings/bank-details
+exports.getBankDetails = async (req, res) => {
+  const building_id = req.query.building_id || req.user.building_id;
+  if (!building_id) return res.status(400).json({ error: 'building_id is required' });
+
+  const { data, error } = await supabase
+    .from('building_bank_details')
+    .select('*')
+    .eq('building_id', building_id)
+    .maybeSingle();
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data || {});
+};
+
+// POST /buildings/bank-details
+exports.saveBankDetails = async (req, res) => {
+  const building_id = req.body.building_id || req.user.building_id;
+  if (!building_id) return res.status(400).json({ error: 'building_id is required' });
+
+  const {
+    bank_name, bank_branch, bank_ifsc, bank_account,
+    beneficiary_name, contact_name, contact_email, contact_mobile,
+  } = req.body;
+
+  if (!bank_account?.trim() || !bank_ifsc?.trim())
+    return res.status(422).json({ error: 'Account number and IFSC are required' });
+
+  const ifsc = bank_ifsc.trim().toUpperCase();
+  if (!IFSC_RE.test(ifsc))
+    return res.status(422).json({ error: 'Invalid IFSC code format (e.g. SBIN0001234)' });
+
+  const payload = {
+    building_id,
+    bank_name: bank_name?.trim() || null,
+    bank_branch: bank_branch?.trim() || null,
+    bank_ifsc: ifsc,
+    bank_account: bank_account.trim(),
+    beneficiary_name: beneficiary_name?.trim() || null,
+    contact_name: contact_name?.trim() || null,
+    contact_email: contact_email?.trim() || null,
+    contact_mobile: contact_mobile?.trim() || null,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase
+    .from('building_bank_details')
+    .upsert(payload, { onConflict: 'building_id' });
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Bank details saved', ...payload });
+};

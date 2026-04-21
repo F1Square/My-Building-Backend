@@ -76,15 +76,20 @@ exports.createLinkedAccount = async (req, res) => {
     });
 
     // Store the linked account ID
-    await supabase
+    const { error: upsertErr } = await supabase
       .from('building_bank_details')
-      .upsert({ building_id, razorpay_account_id: account.id, updated_at: new Date().toISOString() })
-      .eq('building_id', building_id);
+      .upsert({
+        building_id,
+        razorpay_account_id: account.id,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'building_id' });
+
+    if (upsertErr) console.error('DB upsert error:', upsertErr);
 
     res.status(201).json({ message: 'Linked account created', account_id: account.id, account });
   } catch (err) {
-    console.error('Razorpay linked account error:', err);
-    res.status(500).json({ error: err.error?.description || err.message || 'Failed to create linked account' });
+    console.error('Razorpay linked account error:', JSON.stringify(err?.error || err?.message || err));
+    res.status(500).json({ error: err?.error?.description || err?.message || 'Failed to create linked account' });
   }
 };
 
@@ -155,7 +160,7 @@ exports.getLinkedAccount = async (req, res) => {
     .from('building_bank_details')
     .select('razorpay_account_id, bank_name, bank_account, bank_ifsc')
     .eq('building_id', building_id)
-    .single();
+    .maybeSingle();
 
   if (!bankRow?.razorpay_account_id)
     return res.json({ linked: false });
@@ -164,6 +169,7 @@ exports.getLinkedAccount = async (req, res) => {
     const account = await razorpay.accounts.fetch(bankRow.razorpay_account_id);
     res.json({ linked: true, account_id: bankRow.razorpay_account_id, account });
   } catch (err) {
+    // Account ID exists in DB but Razorpay fetch failed — still show as linked
     res.json({ linked: true, account_id: bankRow.razorpay_account_id, account: null, error: err.message });
   }
 };

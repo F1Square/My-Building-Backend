@@ -438,3 +438,67 @@ exports.toggleNewspaperAddon = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
   res.json({ message: 'Newspaper add-on disabled' });
 };
+
+// ── Validate promo code (web-friendly endpoint) ──────────────────────────────
+exports.validatePromoCode = async (req, res) => {
+  const { code } = req.body;
+  if (!code?.trim()) return res.status(422).json({ error: 'Promo code is required' });
+
+  const { data: promo, error } = await supabase
+    .from('promo_codes')
+    .select('*')
+    .ilike('code', code.trim())
+    .single();
+
+  if (error || !promo) return res.status(404).json({ error: 'Invalid promo code' });
+  if (promo.is_used) return res.status(400).json({ error: 'This promo code has already been used' });
+  if (promo.expires_at && new Date(promo.expires_at) < new Date())
+    return res.status(400).json({ error: 'This promo code has expired' });
+
+  const discount_percent = promo.type === 'percent' ? promo.value : null;
+  const discount = promo.type !== 'percent' ? promo.value : null;
+
+  res.json({ id: promo.id, code: promo.code, discount_percent, discount });
+};
+
+// ── Upgrade plan ─────────────────────────────────────────────────────────────
+exports.upgradePlan = async (req, res) => {
+  const { plan_id } = req.body;
+  if (!plan_id) return res.status(422).json({ error: 'plan_id is required' });
+
+  // Get current subscription
+  const { data: sub } = await supabase
+    .from('subscriptions')
+    .select('*')
+    .eq('user_id', req.user.id)
+    .single();
+
+  if (!sub || sub.status !== 'active')
+    return res.status(400).json({ error: 'Active subscription required to upgrade' });
+
+  // Get target plan
+  const { data: plan } = await supabase
+    .from('subscription_plans')
+    .select('*')
+    .eq('id', plan_id)
+    .single();
+
+  if (!plan) return res.status(404).json({ error: 'Plan not found' });
+
+  const now = new Date();
+  const expires_at = plan.duration_days
+    ? new Date(now.getTime() + plan.duration_days * 24 * 60 * 60 * 1000).toISOString()
+    : null;
+
+  const { error } = await supabase
+    .from('subscriptions')
+    .update({ plan: plan.name, status: 'active', started_at: now.toISOString(), expires_at })
+    .eq('user_id', req.user.id);
+
+  if (error) return res.status(400).json({ error: error.message });
+
+  const { data: updated } = await supabase
+    .from('subscriptions').select('*').eq('user_id', req.user.id).single();
+
+  res.json({ message: 'Plan upgraded', subscription: updated });
+};
