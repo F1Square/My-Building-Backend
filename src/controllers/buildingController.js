@@ -166,8 +166,8 @@ exports.getBankDetails = async (req, res) => {
   res.json(data || {});
 };
 
-// Admin: upsert bank details for a building
-exports.saveBankDetails = async (req, res) => {
+// Admin: upsert bank details for a building (legacy - keeping for compatibility)
+exports.saveBankDetailsLegacy = async (req, res) => {
   const building_id = req.user.building_id || req.body.building_id;
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
   const { bank_name, bank_branch, bank_ifsc, bank_account, beneficiary_name, contact_name, contact_email, contact_mobile } = req.body;
@@ -312,10 +312,7 @@ exports.saveBankDetails = async (req, res) => {
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
 
   const {
-    bank_name, bank_branch, bank_ifsc, bank_account,
-    beneficiary_name, contact_name, contact_email, contact_mobile,
-    business_type, profile_category, profile_subcategory,
-    address, address2, city, state, pincode,
+    bank_name, bank_ifsc, bank_account, beneficiary_name, razorpay_account_id
   } = req.body;
 
   if (!bank_account?.trim() || !bank_ifsc?.trim())
@@ -328,21 +325,10 @@ exports.saveBankDetails = async (req, res) => {
   const payload = {
     building_id,
     bank_name: bank_name?.trim() || null,
-    bank_branch: bank_branch?.trim() || null,
     bank_ifsc: ifsc,
     bank_account: bank_account.trim(),
     beneficiary_name: beneficiary_name?.trim() || null,
-    contact_name: contact_name?.trim() || null,
-    contact_email: contact_email?.trim() || null,
-    contact_mobile: contact_mobile?.trim() || null,
-    business_type: business_type?.trim() || 'society',
-    profile_category: profile_category?.trim() || 'others',
-    profile_subcategory: profile_subcategory?.trim() || 'others',
-    address: address?.trim() || null,
-    address2: address2?.trim() || null,
-    city: city?.trim() || null,
-    state: state?.trim() || null,
-    pincode: pincode?.trim() || null,
+    razorpay_account_id: razorpay_account_id?.trim() || null,
     updated_at: new Date().toISOString(),
   };
 

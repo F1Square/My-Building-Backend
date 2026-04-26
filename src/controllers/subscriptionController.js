@@ -146,9 +146,9 @@ exports.adminRevoke = async (req, res) => {
   const { user_id } = req.body;
   if (!user_id) return res.status(422).json({ error: 'user_id is required' });
   const { error } = await supabase
-    .from('subscriptions').update({ status: 'cancelled' }).eq('user_id', user_id);
+    .from('subscriptions').update({ status: 'cancelled', newspaper_addon: false }).eq('user_id', user_id);
   if (error) return res.status(400).json({ error: error.message });
-  res.json({ message: 'Subscription revoked' });
+  res.json({ message: 'Subscription and newspaper addon revoked' });
 };
 
 // Admin: get all subscriptions with user details
