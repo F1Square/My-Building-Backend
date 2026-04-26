@@ -314,6 +314,8 @@ exports.saveBankDetails = async (req, res) => {
   const {
     bank_name, bank_branch, bank_ifsc, bank_account,
     beneficiary_name, contact_name, contact_email, contact_mobile,
+    business_type, profile_category, profile_subcategory,
+    address, address2, city, state, pincode,
   } = req.body;
 
   if (!bank_account?.trim() || !bank_ifsc?.trim())
@@ -333,6 +335,14 @@ exports.saveBankDetails = async (req, res) => {
     contact_name: contact_name?.trim() || null,
     contact_email: contact_email?.trim() || null,
     contact_mobile: contact_mobile?.trim() || null,
+    business_type: business_type?.trim() || 'society',
+    profile_category: profile_category?.trim() || 'others',
+    profile_subcategory: profile_subcategory?.trim() || 'others',
+    address: address?.trim() || null,
+    address2: address2?.trim() || null,
+    city: city?.trim() || null,
+    state: state?.trim() || null,
+    pincode: pincode?.trim() || null,
     updated_at: new Date().toISOString(),
   };
 

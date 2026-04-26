@@ -27,6 +27,7 @@ router.post('/pay/verify', authenticate, requireRole('user'), c.verifyPayment);
 router.get('/receipt/:payment_record_id', authenticate, c.downloadReceipt);
 router.post('/reminder', authenticate, requireRole('pramukh', 'admin'), c.sendReminder);
 router.get('/report/:bill_id', authenticate, requireRole('pramukh', 'admin'), c.getReport);
+router.get('/transfer-status', authenticate, requireRole('pramukh', 'admin'), c.getTransferStatus);
 
 // Advance payment routes
 router.get('/advance/status', authenticate, requireRole('user', 'pramukh'), c2.getAdvanceStatus);

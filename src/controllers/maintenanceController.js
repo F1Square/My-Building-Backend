@@ -786,8 +786,16 @@ exports.paymentCallback = async (req, res) => {
       .eq('building_id', rec.building_id)
       .single();
 
+    console.log('[Routes] Bank details for building:', rec.building_id, bankRow);
+
     if (bankRow?.razorpay_account_id) {
       const amountPaise = Math.round(Number(rec.total_amount || rec.amount) * 100);
+      console.log('[Routes] Attempting transfer:', {
+        payment_id: razorpay_payment_id,
+        account_id: bankRow.razorpay_account_id,
+        amount_paise: amountPaise
+      });
+      
       const result = await transferToLinkedAccount(
         razorpay_payment_id,
         bankRow.razorpay_account_id,
@@ -798,15 +806,30 @@ exports.paymentCallback = async (req, res) => {
           bill_period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}`,
         }
       );
+      
+      console.log('[Routes] Transfer result:', result);
+      
       if (!result.success) {
         console.error('[Routes] Transfer failed:', result.error);
-        // Don't fail the payment — log and continue
+        // Store the error for debugging
+        await supabase.from('maintenance_payments')
+          .update({ 
+            transfer_error: result.error,
+            transfer_attempted_at: new Date().toISOString()
+          })
+          .eq('id', record_id);
       } else {
+        console.log('[Routes] Transfer successful:', result.transfer?.id);
         // Store transfer ID on the payment record
         await supabase.from('maintenance_payments')
-          .update({ razorpay_transfer_id: result.transfer?.id })
+          .update({ 
+            razorpay_transfer_id: result.transfer?.id,
+            transfer_completed_at: new Date().toISOString()
+          })
           .eq('id', record_id);
       }
+    } else {
+      console.log('[Routes] No linked account found for building:', rec.building_id);
     }
   }
 
@@ -1052,6 +1075,7 @@ exports.getReport = async (req, res) => {
   doc.text(`Generated on ${new Date().toLocaleString('en-IN')}`, 50, doc.page.height - 40, { align: 'center', width: doc.page.width - 100 });
   doc.end();
 };
+// Send payment reminders
 exports.sendReminder = async (req, res) => {
   const { user_id, bill_id } = req.body;
   const building_id = req.user.building_id || req.body.building_id;
@@ -1106,4 +1130,47 @@ exports.sendReminder = async (req, res) => {
   }
 
   res.json({ message: `Reminder sent to ${pending.length} member(s)` });
+};
+
+// Get transfer status for debugging
+exports.getTransferStatus = async (req, res) => {
+  const building_id = req.user.building_id || req.query.building_id;
+  if (!building_id) return res.status(400).json({ error: 'building_id is required' });
+
+  try {
+    // Get recent payments with transfer info
+    const { data: payments } = await supabase
+      .from('maintenance_payments')
+      .select(`
+        id, amount, total_amount, status, razorpay_payment_id, razorpay_transfer_id,
+        transfer_error, transfer_attempted_at, transfer_completed_at, paid_at,
+        users(name, flat_no),
+        maintenance_bills(month, year, description)
+      `)
+      .eq('building_id', building_id)
+      .eq('status', 'paid')
+      .order('paid_at', { ascending: false })
+      .limit(20);
+
+    // Get bank details
+    const { data: bankDetails } = await supabase
+      .from('building_bank_details')
+      .select('razorpay_account_id, bank_name, bank_account')
+      .eq('building_id', building_id)
+      .single();
+
+    res.json({
+      payments: payments || [],
+      bank_details: bankDetails,
+      summary: {
+        total_payments: payments?.length || 0,
+        successful_transfers: payments?.filter(p => p.razorpay_transfer_id).length || 0,
+        failed_transfers: payments?.filter(p => p.transfer_error).length || 0,
+        pending_transfers: payments?.filter(p => !p.razorpay_transfer_id && !p.transfer_error).length || 0,
+      }
+    });
+  } catch (error) {
+    console.error('Transfer status error:', error);
+    res.status(500).json({ error: 'Failed to fetch transfer status' });
+  }
 };

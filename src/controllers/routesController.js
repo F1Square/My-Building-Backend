@@ -23,18 +23,36 @@ exports.createLinkedAccount = async (req, res) => {
 
   const {
     legal_business_name,
-    business_type,       // route, individual, etc.
+    business_type,
     contact_name,
     contact_email,
     contact_mobile,
-    profile_category,   // e.g. "housing_society"
+    address,
+    address2,
+    city,
+    state,
+    pincode,
+    profile_category,
     profile_subcategory,
     legal_info_pan,
     legal_info_gst,
   } = req.body;
 
-  if (!legal_business_name || !contact_email || !contact_mobile)
-    return res.status(422).json({ error: 'legal_business_name, contact_email and contact_mobile are required' });
+  // Validate required fields per Razorpay documentation
+  if (!legal_business_name || legal_business_name.length < 4 || legal_business_name.length > 200)
+    return res.status(422).json({ error: 'legal_business_name is required (4-200 characters)' });
+  
+  if (!contact_email)
+    return res.status(422).json({ error: 'contact_email is required' });
+  
+  if (!contact_mobile || contact_mobile.length < 8 || contact_mobile.length > 15)
+    return res.status(422).json({ error: 'contact_mobile is required (8-15 characters)' });
+  
+  if (!contact_name || contact_name.length < 4)
+    return res.status(422).json({ error: 'contact_name is required (min 4 characters)' });
+  
+  if (!address || !address2 || !city || !state || !pincode)
+    return res.status(422).json({ error: 'Complete address (street1, street2, city, state, pincode) is required' });
 
   // Check if already exists
   const { data: existing } = await supabase
@@ -49,31 +67,37 @@ exports.createLinkedAccount = async (req, res) => {
 
   try {
     // Create linked account via Razorpay Routes API
-    const account = await razorpay.accounts.create({
+    const accountPayload = {
       email: contact_email,
       phone: contact_mobile,
+      type: 'route',
+      legal_business_name,
+      business_type: business_type || 'society',
+      contact_name,
       profile: {
-        category: profile_category || 'housing_society',
-        subcategory: profile_subcategory || 'housing_society',
+        category: profile_category || 'others',
+        subcategory: profile_subcategory || 'others',
         addresses: {
           registered: {
-            street1: req.body.address || 'Society Address',
-            city: req.body.city || 'City',
-            state: req.body.state || 'State',
-            postal_code: req.body.pincode || '380001',
+            street1: address,
+            street2: address2,
+            city,
+            state,
+            postal_code: pincode,
             country: 'IN',
           },
         },
       },
-      type: 'route',
-      legal_business_name,
-      business_type: business_type || 'individual',
-      contact_name,
-      legal_info: {
-        pan: legal_info_pan || undefined,
-        gst: legal_info_gst || undefined,
-      },
-    });
+    };
+
+    // Add legal info only if provided
+    if (legal_info_pan || legal_info_gst) {
+      accountPayload.legal_info = {};
+      if (legal_info_pan) accountPayload.legal_info.pan = legal_info_pan;
+      if (legal_info_gst) accountPayload.legal_info.gst = legal_info_gst;
+    }
+
+    const account = await razorpay.accounts.create(accountPayload);
 
     // Store the linked account ID
     const { error: upsertErr } = await supabase
@@ -158,7 +182,7 @@ exports.getLinkedAccount = async (req, res) => {
 
   const { data: bankRow } = await supabase
     .from('building_bank_details')
-    .select('razorpay_account_id, bank_name, bank_account, bank_ifsc')
+    .select('razorpay_account_id, bank_name, bank_account, bank_ifsc, beneficiary_name')
     .eq('building_id', building_id)
     .maybeSingle();
 
@@ -167,10 +191,172 @@ exports.getLinkedAccount = async (req, res) => {
 
   try {
     const account = await razorpay.accounts.fetch(bankRow.razorpay_account_id);
-    res.json({ linked: true, account_id: bankRow.razorpay_account_id, account });
+    res.json({ 
+      linked: true, 
+      account_id: bankRow.razorpay_account_id, 
+      account,
+      bank_details: {
+        bank_name: bankRow.bank_name,
+        bank_account: bankRow.bank_account,
+        bank_ifsc: bankRow.bank_ifsc,
+        beneficiary_name: bankRow.beneficiary_name
+      }
+    });
   } catch (err) {
     // Account ID exists in DB but Razorpay fetch failed — still show as linked
-    res.json({ linked: true, account_id: bankRow.razorpay_account_id, account: null, error: err.message });
+    res.json({ 
+      linked: true, 
+      account_id: bankRow.razorpay_account_id, 
+      account: null, 
+      error: err.message,
+      bank_details: {
+        bank_name: bankRow.bank_name,
+        bank_account: bankRow.bank_account,
+        bank_ifsc: bankRow.bank_ifsc,
+        beneficiary_name: bankRow.beneficiary_name
+      }
+    });
+  }
+};
+
+// ── Get all linked accounts (Admin only) ──────────────────────────────────
+exports.getAllLinkedAccounts = async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+
+  try {
+    const { data: bankDetails } = await supabase
+      .from('building_bank_details')
+      .select(`
+        building_id,
+        razorpay_account_id,
+        bank_name,
+        bank_account,
+        bank_ifsc,
+        beneficiary_name,
+        contact_name,
+        contact_email,
+        contact_mobile,
+        updated_at,
+        buildings(name, address)
+      `)
+      .not('razorpay_account_id', 'is', null);
+
+    const accountsWithStatus = await Promise.all(
+      bankDetails.map(async (detail) => {
+        try {
+          const account = await razorpay.accounts.fetch(detail.razorpay_account_id);
+          return {
+            ...detail,
+            razorpay_status: account.status,
+            razorpay_account: account
+          };
+        } catch (err) {
+          return {
+            ...detail,
+            razorpay_status: 'error',
+            razorpay_error: err.message
+          };
+        }
+      })
+    );
+
+    res.json(accountsWithStatus);
+  } catch (err) {
+    console.error('Get all linked accounts error:', err);
+    res.status(500).json({ error: 'Failed to fetch linked accounts' });
+  }
+};
+
+// ── Manual transfer retry for debugging ──────────────────────────────────
+exports.retryTransfer = async (req, res) => {
+  const { payment_record_id } = req.body;
+  
+  if (!payment_record_id) {
+    return res.status(400).json({ error: 'payment_record_id is required' });
+  }
+
+  try {
+    // Get payment record
+    const { data: payment } = await supabase
+      .from('maintenance_payments')
+      .select(`
+        id, razorpay_payment_id, amount, total_amount, building_id,
+        users(name), maintenance_bills(month, year)
+      `)
+      .eq('id', payment_record_id)
+      .eq('status', 'paid')
+      .single();
+
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment record not found or not paid' });
+    }
+
+    if (!payment.razorpay_payment_id) {
+      return res.status(400).json({ error: 'No Razorpay payment ID found' });
+    }
+
+    // Get bank details
+    const { data: bankRow } = await supabase
+      .from('building_bank_details')
+      .select('razorpay_account_id')
+      .eq('building_id', payment.building_id)
+      .single();
+
+    if (!bankRow?.razorpay_account_id) {
+      return res.status(400).json({ error: 'No linked account found for this building' });
+    }
+
+    // Attempt transfer
+    const amountPaise = Math.round(Number(payment.total_amount || payment.amount) * 100);
+    const result = await exports.transferToLinkedAccount(
+      payment.razorpay_payment_id,
+      bankRow.razorpay_account_id,
+      amountPaise,
+      {
+        record_id: payment_record_id,
+        building_id: payment.building_id,
+        bill_period: `${payment.maintenance_bills?.month}/${payment.maintenance_bills?.year}`,
+        retry: true
+      }
+    );
+
+    if (result.success) {
+      // Update payment record with transfer ID
+      await supabase.from('maintenance_payments')
+        .update({ 
+          razorpay_transfer_id: result.transfer?.id,
+          transfer_completed_at: new Date().toISOString(),
+          transfer_error: null
+        })
+        .eq('id', payment_record_id);
+
+      res.json({ 
+        success: true, 
+        message: 'Transfer completed successfully',
+        transfer_id: result.transfer?.id,
+        amount: amountPaise / 100
+      });
+    } else {
+      // Update with error
+      await supabase.from('maintenance_payments')
+        .update({ 
+          transfer_error: result.error,
+          transfer_attempted_at: new Date().toISOString()
+        })
+        .eq('id', payment_record_id);
+
+      res.status(400).json({ 
+        success: false, 
+        error: result.error,
+        error_code: result.error_code,
+        error_field: result.error_field
+      });
+    }
+  } catch (error) {
+    console.error('Retry transfer error:', error);
+    res.status(500).json({ error: 'Failed to retry transfer' });
   }
 };
 
@@ -178,7 +364,24 @@ exports.getLinkedAccount = async (req, res) => {
 // This is called internally from maintenanceController after payment success
 exports.transferToLinkedAccount = async (payment_id, account_id, amount_paise, notes = {}) => {
   try {
-    const transfer = await razorpay.payments.transfer(payment_id, {
+    console.log('[Routes] Transfer request:', {
+      payment_id,
+      account_id,
+      amount_paise,
+      notes
+    });
+
+    // Validate inputs
+    if (!payment_id || !account_id || !amount_paise) {
+      throw new Error('Missing required parameters: payment_id, account_id, or amount_paise');
+    }
+
+    if (amount_paise < 100) {
+      throw new Error('Amount must be at least ₹1 (100 paise)');
+    }
+
+    // Create transfer using Razorpay API
+    const transferPayload = {
       transfers: [
         {
           account: account_id,
@@ -188,10 +391,36 @@ exports.transferToLinkedAccount = async (payment_id, account_id, amount_paise, n
           on_hold: 0, // release immediately
         },
       ],
-    });
-    return { success: true, transfer: transfer[0] };
+    };
+
+    console.log('[Routes] Transfer payload:', transferPayload);
+
+    const transfer = await razorpay.payments.transfer(payment_id, transferPayload);
+    
+    console.log('[Routes] Transfer response:', transfer);
+
+    if (transfer && transfer.length > 0) {
+      return { success: true, transfer: transfer[0] };
+    } else {
+      throw new Error('No transfer created in response');
+    }
   } catch (err) {
-    console.error('Transfer error:', err);
-    return { success: false, error: err.error?.description || err.message };
+    console.error('[Routes] Transfer error details:', {
+      error: err,
+      message: err.message,
+      description: err.error?.description,
+      code: err.error?.code,
+      field: err.error?.field,
+      source: err.error?.source,
+      step: err.error?.step,
+      reason: err.error?.reason
+    });
+    
+    return { 
+      success: false, 
+      error: err.error?.description || err.message || 'Unknown transfer error',
+      error_code: err.error?.code,
+      error_field: err.error?.field
+    };
   }
 };
