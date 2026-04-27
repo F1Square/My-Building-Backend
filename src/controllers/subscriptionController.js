@@ -30,8 +30,12 @@ exports.createOrder = async (req, res) => {
 
   const planInfo = PLANS[plan];
   let amount = planInfo.amount;
-  // Add ₹3 (300 paise) for newspaper add-on
-  if (include_newspaper) amount += 300;
+  // Newspaper add-on pricing based on plan type
+  if (include_newspaper) {
+    if (plan === 'yearly') amount += 3600; // ₹36
+    else if (plan === 'lifetime') amount += 50000; // ₹500
+    else amount += 300; // ₹3
+  }
   let appliedPromo = null;
 
   // Apply promo discount if provided
@@ -187,8 +191,7 @@ exports.requireSubscription = async (req, res, next) => {
 exports.checkoutPage = (req, res) => {
   const { order_id } = req.params;
   const { amount, key, plan, user_id } = req.query;
-  const backendUrl = process.env.BACKEND_URL || '';
-  const callbackUrl = `${backendUrl}/api/subscriptions/callback?plan=${plan}&user_id=${user_id}`;
+  const callbackUrl = `/api/subscriptions/callback?plan=${plan}&user_id=${user_id}`;
   const planLabel = plan === 'lifetime' ? '₹1,500 Lifetime' : plan === 'yearly' ? '₹180/year' : plan === 'newspaper_addon' ? '₹3 Newspaper Add-On' : '₹15/month';
 
   res.setHeader('Content-Type', 'text/html');
@@ -365,12 +368,12 @@ exports.paymentCallback = async (req, res) => {
 
 const NEWSPAPER_ADDON_AMOUNT = 300; // ₹3 in paise
 
-// Create Razorpay order for ₹3 newspaper add-on
+// Create Razorpay order for newspaper add-on
 exports.createNewspaperAddonOrder = async (req, res) => {
   // Must have an active subscription
   const { data: sub } = await supabase
     .from('subscriptions')
-    .select('id, status, expires_at, newspaper_addon')
+    .select('id, plan, status, expires_at, newspaper_addon')
     .eq('user_id', req.user.id)
     .single();
 
@@ -381,9 +384,13 @@ exports.createNewspaperAddonOrder = async (req, res) => {
     return res.status(400).json({ error: 'Newspaper add-on is already active' });
   }
 
+  let addonAmount = 300; // default ₹3
+  if (sub.plan === 'yearly') addonAmount = 3600; // ₹36
+  else if (sub.plan === 'lifetime') addonAmount = 50000; // ₹500
+
   try {
     const order = await razorpay.orders.create({
-      amount: NEWSPAPER_ADDON_AMOUNT,
+      amount: addonAmount,
       currency: 'INR',
       receipt: `news_${req.user.id.slice(0, 20)}`,
       notes: { user_id: req.user.id, type: 'newspaper_addon' },
