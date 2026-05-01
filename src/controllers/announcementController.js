@@ -56,12 +56,15 @@ exports.getAnnouncements = async (req, res) => {
     return res.status(400).json({ error: 'You must be part of a building' });
   }
 
+  const limit = parseInt(req.query.limit) || 50;
+  const offset = parseInt(req.query.offset) || 0;
+
   const { data, error } = await supabase
     .from('announcements')
     .select('*, users(name)')
     .eq('building_id', building_id)
     .order('created_at', { ascending: false })
-    .limit(50);
+    .range(offset, offset + limit - 1);
 
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);

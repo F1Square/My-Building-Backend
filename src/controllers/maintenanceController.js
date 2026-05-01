@@ -1,15 +1,9 @@
 const supabase = require('../supabase');
-const Razorpay = require('razorpay');
 const PDFDocument = require('pdfkit');
 const ns = require('../utils/notificationService');
 const addMaintenanceExpense = require('../utils/addMaintenanceExpense');
 const settleAdvanceCredit = require('../utils/settleAdvanceCredit');
 const { uploadImage } = require('../utils/imageUploadHelper');
-
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET
-});
 
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -396,9 +390,9 @@ exports.getPaymentRecords = async (req, res) => {
 exports.uploadReceiptImage = async (req, res) => {
   try {
     const { payment_record_id } = req.body;
-    
+
     if (!req.file) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         error: 'No receipt image provided',
         code: 'MISSING_FILE'
@@ -406,7 +400,7 @@ exports.uploadReceiptImage = async (req, res) => {
     }
 
     if (!payment_record_id) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         error: 'payment_record_id is required',
         code: 'MISSING_PAYMENT_ID'
@@ -422,7 +416,7 @@ exports.uploadReceiptImage = async (req, res) => {
       .single();
 
     if (!record) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
         error: 'Payment record not found',
         code: 'RECORD_NOT_FOUND'
@@ -430,7 +424,7 @@ exports.uploadReceiptImage = async (req, res) => {
     }
 
     if (record.status === 'paid') {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         error: 'Payment already completed',
         code: 'ALREADY_PAID'
@@ -446,7 +440,7 @@ exports.uploadReceiptImage = async (req, res) => {
     // Update payment record with receipt URL
     const { error } = await supabase
       .from('maintenance_payments')
-      .update({ 
+      .update({
         receipt_url: result.secure_url,
         status: 'receipt_uploaded'
       })
@@ -454,7 +448,7 @@ exports.uploadReceiptImage = async (req, res) => {
 
     if (error) {
       console.error('Database update error:', error);
-      return res.status(500).json({ 
+      return res.status(500).json({
         success: false,
         error: 'Failed to save receipt reference',
         code: 'DATABASE_ERROR'
@@ -472,7 +466,7 @@ exports.uploadReceiptImage = async (req, res) => {
     });
   } catch (error) {
     console.error('Receipt upload error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: error.message || 'Failed to upload receipt',
       code: 'UPLOAD_FAILED'
@@ -505,7 +499,7 @@ exports.uploadReceipt = async (req, res) => {
   res.json({ message: 'Receipt uploaded', status: 'receipt_uploaded' });
 };
 
-// User/Pramukh: create Razorpay order + return checkout page URL (served by our backend)
+// User/Pramukh: create PhonePe order + return checkout URL
 exports.createPaymentOrder = async (req, res) => {
   const { payment_record_id } = req.body;
   if (!payment_record_id) return res.status(422).json({ error: 'payment_record_id is required' });
@@ -513,7 +507,7 @@ exports.createPaymentOrder = async (req, res) => {
   // Fetch payment record with bill, user, and building info
   const { data: record, error: recErr } = await supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(amount, month, year, due_date, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, phone), buildings(name, address)')
+    .select('*, maintenance_bills(amount, month, year, due_date, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, phone, id), buildings(name, address)')
     .eq('id', payment_record_id).eq('user_id', req.user.id).single();
 
   if (recErr || !record) return res.status(404).json({ error: 'Payment record not found' });
@@ -532,318 +526,114 @@ exports.createPaymentOrder = async (req, res) => {
     .eq('id', payment_record_id);
 
   try {
-    const amountPaise = Math.round(totalAmount * 100);
-
-    // Fetch society bank details for this building — used in notes for reconciliation
-    const { data: bankDetails } = await supabase
-      .from('building_bank_details')
-      .select('bank_name, bank_account, bank_ifsc, bank_branch, razorpay_account_id')
-      .eq('building_id', record.building_id)
-      .single();
-
-    // Embed society + payer info in Razorpay notes for audit/reconciliation
-    const notes = {
-      society_name: record.buildings?.name || 'Unknown Society',
-      society_account: bankDetails?.bank_account || 'Not configured',
-      society_ifsc: bankDetails?.bank_ifsc || 'Not configured',
-      society_bank: bankDetails?.bank_name || 'Not configured',
-      payer_name: record.users?.name || '',
-      payer_flat: record.users?.flat_no || '',
-      payer_phone: record.users?.phone || '',
-      bill_period: `${MONTHS[record.maintenance_bills.month]} ${record.maintenance_bills.year}`,
-      bill_amount: billAmount,
-      penalty_amount: isOverdue ? penaltyAmount : 0,
-      total_amount: totalAmount,
-      payment_record_id,
-      building_id: record.building_id,
-    };
-
-    const orderOptions = {
-      amount: amountPaise,
-      currency: 'INR',
-      receipt: `maint_${payment_record_id.slice(0, 20)}`,
-      notes,
-    };
-
-    if (bankDetails?.razorpay_account_id) {
-      orderOptions.transfers = [
-        {
-          account: bankDetails.razorpay_account_id,
-          amount: amountPaise,
-          currency: 'INR',
-          notes,
-          on_hold: 0,
-        }
-      ];
-    }
-
-    const order = await razorpay.orders.create(orderOptions);
-
-    await supabase.from('maintenance_payments')
-      .update({ razorpay_order_id: order.id })
-      .eq('id', payment_record_id);
-
+    const { generatePaymentRequest } = require('../utils/phonepeHelper');
+    const merchantTransactionId = `MNT_${payment_record_id.replace(/-/g, '')}_${Date.now()}`.substring(0, 34); // PhonePe limit is 34 chars
     const backendUrl = process.env.BACKEND_URL;
     if (!backendUrl) return res.status(500).json({ error: 'BACKEND_URL not set in .env' });
 
-    const checkoutUrl = `${backendUrl}/api/maintenance/pay/checkout/${order.id}?record_id=${payment_record_id}&amount=${order.amount}&key=${process.env.RAZORPAY_KEY_ID}&society=${encodeURIComponent(record.buildings?.name || 'Society')}&penalty=${isOverdue && penaltyAmount > 0 ? penaltyAmount : 0}&bill=${billAmount}`;
+    // This URL will handle the redirect from PhonePe after payment
+    const redirectUrl = `${backendUrl}/api/maintenance/pay/phonepe-callback?record_id=${payment_record_id}&txn_id=${merchantTransactionId}`;
 
-    res.json({
-      order_id: order.id,
-      amount: order.amount,
-      currency: order.currency,
-      key: process.env.RAZORPAY_KEY_ID,
-      checkout_url: checkoutUrl,
-      payment_record_id,
-      society_name: record.buildings?.name,
-      bill_amount: billAmount,
-      penalty_amount: isOverdue ? penaltyAmount : 0,
-      total_amount: totalAmount,
-      is_overdue: isOverdue && penaltyAmount > 0,
+    const phonepeResponse = await generatePaymentRequest({
+      merchantTransactionId,
+      amount: totalAmount,
+      userId: record.users.id,
+      mobileNumber: record.users.phone || "9999999999",
+      redirectUrl
     });
-  } catch (err) {
-    console.error('Razorpay order error:', err);
-    res.status(500).json({ error: 'Failed to create payment order: ' + (err.error?.description || err.message) });
-  }
-};
 
-// Serve Razorpay checkout HTML page (opened in browser)
-exports.checkoutPage = (req, res) => {
-  const { order_id } = req.params;
-  const { record_id, amount, key, society, penalty, bill } = req.query;
-  const backendUrl = process.env.BACKEND_URL || '';
-  const callbackUrl = `${backendUrl}/api/maintenance/pay/callback?record_id=${record_id}`;
-  const societyName = decodeURIComponent(society || 'Society');
-  const penaltyAmt = parseFloat(penalty || 0);
-  const billAmt = parseFloat(bill || 0);
-  const penaltyLine = penaltyAmt > 0
-    ? `<div class="breakdown"><span>Bill</span><span>₹${billAmt.toLocaleString('en-IN')}</span></div><div class="breakdown penalty"><span>⚠️ Late Penalty</span><span>+₹${penaltyAmt.toLocaleString('en-IN')}</span></div>`
-    : '';
-
-  res.setHeader('Content-Type', 'text/html');
-  res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-  <title>My Building — Pay Maintenance</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, sans-serif; background: #f5f7fa; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
-    .card { background: #fff; border-radius: 16px; padding: 32px 24px; max-width: 400px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.08); text-align: center; }
-    .logo { font-size: 28px; font-weight: 800; color: #1E3A8A; margin-bottom: 4px; }
-    .society { color: #1E3A8A; font-size: 15px; font-weight: 700; background: #EFF6FF; border-radius: 8px; padding: 6px 14px; display: inline-block; margin-bottom: 16px; }
-    .subtitle { color: #6B7280; font-size: 14px; margin-bottom: 20px; }
-    .amount { font-size: 36px; font-weight: 800; color: #111827; margin-bottom: 4px; }
-    .label { font-size: 13px; color: #9CA3AF; margin-bottom: 28px; }
-    .breakdown { display: flex; justify-content: space-between; font-size: 14px; color: #6B7280; margin-bottom: 4px; }
-    .breakdown.penalty { color: #DC2626; font-weight: 600; }
-    .btn { background: #1E3A8A; color: #fff; border: none; border-radius: 12px; padding: 16px 32px; font-size: 16px; font-weight: 700; cursor: pointer; width: 100%; }
-    .btn:disabled { opacity: 0.6; }
-    .status { margin-top: 20px; font-size: 14px; color: #6B7280; }
-    .secure { font-size: 12px; color: #9CA3AF; margin-top: 16px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="logo">🏢 My Building</div>
-    <div class="society">${societyName}</div>
-    <div class="subtitle">Maintenance Payment</div>
-    ${penaltyLine}
-    <div class="amount">₹${Math.round(Number(amount) / 100).toLocaleString('en-IN')}</div>
-    <div class="label">${penaltyAmt > 0 ? 'Total (includes late penalty)' : 'Tap below to pay securely via Razorpay'}</div>
-    <button class="btn" id="payBtn" onclick="startPayment()">Pay Now</button>
-    <div class="status" id="status"></div>
-    <div class="secure">🔒 Secured by Razorpay · Payment ID logged for audit</div>
-  </div>
-  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-  <script>
-    function startPayment() {
-      var btn = document.getElementById('payBtn');
-      btn.disabled = true;
-      btn.textContent = 'Opening payment...';
-      var options = {
-        key: "${key}",
-        amount: ${amount},
-        currency: "INR",
-        order_id: "${order_id}",
-        name: "My Building",
-        description: "${societyName} — Maintenance",
-        theme: { color: "#1E3A8A" },
-        config: {
-          display: {
-            blocks: {
-              upi: { name: "Pay via UPI", instruments: [{ method: "upi" }] },
-              other: { name: "Other Methods", instruments: [{ method: "card" }, { method: "netbanking" }, { method: "wallet" }] }
-            },
-            sequence: ["block.upi", "block.other"],
-            preferences: { show_default_blocks: true }
-          }
-        },
-        handler: function(response) {
-          document.getElementById('status').textContent = 'Verifying payment...';
-          fetch('${callbackUrl}', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              razorpay_payment_id: response.razorpay_payment_id,
-              razorpay_order_id: response.razorpay_order_id,
-              razorpay_signature: response.razorpay_signature
-            })
-          })
-          .then(function(r) { return r.json(); })
-          .then(function(data) {
-            if (data.success) {
-              document.getElementById('status').textContent = '✅ Payment successful!';
-              setTimeout(function() {
-                window.location.href = 'mybuilding://payment?status=success&record_id=${record_id}';
-              }, 1500);
-            } else {
-              document.getElementById('status').textContent = '❌ Verification failed. Contact support.';
-              btn.disabled = false;
-              btn.textContent = 'Retry';
-            }
-          })
-          .catch(function() {
-            document.getElementById('status').textContent = '❌ Network error during verification.';
-            btn.disabled = false;
-            btn.textContent = 'Retry';
-          });
-        },
-        modal: {
-          ondismiss: function() {
-            btn.disabled = false;
-            btn.textContent = 'Pay Now';
-            window.location.href = 'mybuilding://payment?status=cancelled&record_id=${record_id}';
-          }
-        }
-      };
-      var rzp = new Razorpay(options);
-      rzp.on('payment.failed', function(response) {
-        document.getElementById('status').textContent = '❌ ' + (response.error.description || 'Payment failed');
-        btn.disabled = false;
-        btn.textContent = 'Try Again';
-      });
-      rzp.open();
-    }
-    window.onload = function() { startPayment(); };
-  </script>
-</body>
-</html>`);
-};
-
-const logActivity = require('../utils/activityLogger');
-const { transferToAccount } = require('./routesController');
-
-// Razorpay callback — called via fetch from the checkout page
-exports.paymentCallback = async (req, res) => {
-  const { record_id } = req.query;
-  const { razorpay_payment_id, razorpay_order_id, razorpay_signature } = req.body;
-
-  if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
-    return res.json({ success: false, error: 'Missing payment data' });
-  }
-
-  const crypto = require('crypto');
-  const expected = crypto
-    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-    .digest('hex');
-
-  if (expected !== razorpay_signature) {
-    const { data: rec } = await supabase
-      .from('maintenance_payments')
-      .select('user_id, building_id, amount, maintenance_bills(month, year), users(name, role)')
-      .eq('id', record_id).single();
-    if (rec) {
-      await logActivity(
-        { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
-        'payment_failed',
-        'maintenance',
-        { record_id, reason: 'signature_mismatch', amount: rec.amount, period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}` }
-      );
-    }
-    return res.json({ success: false, error: 'Signature mismatch' });
-  }
-
-  const { error } = await supabase.from('maintenance_payments').update({
-    status: 'paid',
-    razorpay_payment_id,
-    paid_at: new Date().toISOString()
-  }).eq('id', record_id);
-
-  if (error) return res.json({ success: false, error: error.message });
-
-  // Fetch payment record for logging + transfer
-  const { data: rec } = await supabase
-    .from('maintenance_payments')
-    .select('user_id, building_id, amount, total_amount, maintenance_bills(month, year, amount), users(name, role)')
-    .eq('id', record_id).single();
-
-  if (rec) {
-    await logActivity(
-      { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
-      'payment_completed',
-      'maintenance',
-      {
-        record_id,
-        razorpay_payment_id,
-        amount_paid: rec.total_amount || rec.amount,
-        bill_period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}`,
-        method: 'online',
-      }
-    );
-
-    // ── Simplified Razorpay Transfer: handled at order creation ──────────────
-    const { data: bankRow } = await supabase
-      .from('building_bank_details')
-      .select('razorpay_account_id')
-      .eq('building_id', rec.building_id)
-      .single();
-
-    console.log('[Transfer] Bank details for building:', rec.building_id, bankRow);
-
-    if (bankRow?.razorpay_account_id) {
-      console.log('[Transfer] Transfer was handled automatically during order creation for:', razorpay_payment_id);
-      
-      // Store dummy transfer ID so the dashboard counts it as successful
+    if (phonepeResponse.success) {
+      // Save the transaction ID to the database (repurposing razorpay_order_id for now)
       await supabase.from('maintenance_payments')
-        .update({ 
-          razorpay_transfer_id: 'order_transfer_auto',
-          transfer_completed_at: new Date().toISOString(),
-          transfer_error: null
-        })
-        .eq('id', record_id);
+        .update({ razorpay_order_id: merchantTransactionId })
+        .eq('id', payment_record_id);
+
+      // Extract the URL to redirect the user to
+      const checkoutUrl = phonepeResponse.data.instrumentResponse.redirectInfo.url;
+
+      res.json({
+        order_id: merchantTransactionId,
+        amount: totalAmount,
+        checkout_url: checkoutUrl,
+        payment_record_id,
+        society_name: record.buildings?.name,
+        is_overdue: isOverdue && penaltyAmount > 0,
+      });
     } else {
-      console.log('[Transfer] No Razorpay account connected for building:', rec.building_id);
+      res.status(500).json({ error: 'PhonePe API error: ' + phonepeResponse.message });
     }
+  } catch (err) {
+    console.error('PhonePe order error:', err);
+    res.status(500).json({ error: 'Failed to create payment order: ' + err.message });
   }
-
-  // Auto-add inflow to expenses module
-  await addMaintenanceExpense(record_id);
-
-  res.json({ success: true });
 };
 
-// User: verify payment
-exports.verifyPayment = async (req, res) => {
-  const { payment_record_id, razorpay_payment_id, razorpay_order_id, razorpay_signature } = req.body;
-  if (!payment_record_id || !razorpay_payment_id || !razorpay_order_id || !razorpay_signature)
-    return res.status(422).json({ error: 'payment_record_id, razorpay_payment_id, razorpay_order_id and razorpay_signature are required' });
-  const crypto = require('crypto');
+// PhonePe Redirect Callback — PhonePe redirects the user here (POST request)
+exports.phonepeCallback = async (req, res) => {
+  const { record_id, txn_id } = req.query;
 
-  const expected = crypto
-    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-    .digest('hex');
+  try {
+    const { checkPaymentStatus } = require('../utils/phonepeHelper');
+    const statusData = await checkPaymentStatus(txn_id);
 
-  if (expected !== razorpay_signature)
-    return res.status(400).json({ error: 'Payment verification failed' });
+    if (statusData && statusData.code === 'PAYMENT_SUCCESS') {
+      const phonepe_payment_id = statusData.data.transactionId; // PhonePe's transaction ID
 
-  await supabase.from('maintenance_payments').update({
-    status: 'paid', razorpay_payment_id, paid_at: new Date().toISOString()
-  }).eq('id', payment_record_id);
+      const { error } = await supabase.from('maintenance_payments').update({
+        status: 'paid',
+        razorpay_payment_id: phonepe_payment_id, // Storing here instead of Razorpay ID
+        paid_at: new Date().toISOString()
+      }).eq('id', record_id);
 
-  res.json({ message: 'Payment verified successfully' });
+      if (!error) {
+        // Fetch payment record for logging
+        const { data: rec } = await supabase
+          .from('maintenance_payments')
+          .select('user_id, building_id, amount, total_amount, maintenance_bills(month, year, amount), users(name, role)')
+          .eq('id', record_id).single();
+
+        if (rec) {
+          await logActivity(
+            { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
+            'payment_completed',
+            'maintenance',
+            {
+              record_id,
+              phonepe_payment_id,
+              amount_paid: rec.total_amount || rec.amount,
+              bill_period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}`,
+              method: 'online',
+            }
+          );
+        }
+      }
+
+      // Auto-add inflow to expenses module
+      await addMaintenanceExpense(record_id);
+
+      // Redirect back to app successfully
+      return res.redirect(`mybuilding://payment?status=success&record_id=${record_id}`);
+    } else {
+      // Payment Failed or Pending
+      const { data: rec } = await supabase
+        .from('maintenance_payments')
+        .select('user_id, building_id, amount, maintenance_bills(month, year), users(name, role)')
+        .eq('id', record_id).single();
+
+      if (rec) {
+        await logActivity(
+          { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
+          'payment_failed',
+          'maintenance',
+          { record_id, reason: statusData?.message || 'verification_failed', amount: rec.amount, period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}` }
+        );
+      }
+      return res.redirect(`mybuilding://payment?status=failed&record_id=${record_id}`);
+    }
+  } catch (err) {
+    console.error("PhonePe callback processing error:", err);
+    return res.redirect(`mybuilding://payment?status=failed&record_id=${record_id}`);
+  }
 };
 
 // Generate PDF receipt

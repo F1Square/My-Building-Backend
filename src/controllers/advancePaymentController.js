@@ -1,12 +1,6 @@
 const crypto = require('crypto');
 const supabase = require('../supabase');
-const Razorpay = require('razorpay');
 const ns = require('../utils/notificationService');
-
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
 
 // GET /maintenance/advance/status
 // Returns credit_balance, months_covered, monthly_amount, ledger for current user
@@ -83,26 +77,7 @@ exports.createAdvanceOrder = async (req, res) => {
   ]);
 
   try {
-    const amountPaise = Math.round(total_amount * 100);
-    const order = await razorpay.orders.create({
-      amount: amountPaise,
-      currency: 'INR',
-      receipt: `adv_${user_id.slice(0, 16)}`,
-      notes: {
-        type: 'advance_maintenance',
-        member_name: userRow?.name || '',
-        member_flat: userRow?.flat_no || '',
-        member_phone: userRow?.phone || '',
-        building_name: buildingRow?.name || '',
-        advance_months: months,
-        monthly_amount,
-        total_amount,
-        building_id,
-        user_id,
-      },
-    });
-
-    // Insert pending order row
+    // Insert pending order row FIRST so we have the ID for the callback
     const { data: orderRow, error: insertErr } = await supabase
       .from('advance_payment_orders')
       .insert({
@@ -112,172 +87,60 @@ exports.createAdvanceOrder = async (req, res) => {
         monthly_amount,
         total_amount,
         status: 'pending',
-        razorpay_order_id: order.id,
+        // razorpay_order_id will be updated below with merchantTransactionId
       })
       .select()
       .single();
 
     if (insertErr) return res.status(500).json({ error: insertErr.message });
 
+    const { generatePaymentRequest } = require('../utils/phonepeHelper');
+    const merchantTransactionId = `ADV_${orderRow.id.replace(/-/g, '')}_${Date.now()}`.substring(0, 34);
     const backendUrl = process.env.BACKEND_URL;
     if (!backendUrl) return res.status(500).json({ error: 'BACKEND_URL not set in .env' });
 
-    const checkoutUrl = `${backendUrl}/api/maintenance/advance/checkout/${order.id}?order_row_id=${orderRow.id}&amount=${order.amount}&key=${process.env.RAZORPAY_KEY_ID}&society=${encodeURIComponent(buildingRow?.name || 'Society')}&months=${months}&monthly=${monthly_amount}`;
+    // Update order with the generated transaction ID
+    await supabase.from('advance_payment_orders')
+      .update({ razorpay_order_id: merchantTransactionId })
+      .eq('id', orderRow.id);
 
-    res.json({ order_id: order.id, checkout_url: checkoutUrl, total_amount, monthly_amount, months });
-  } catch (err) {
-    console.error('Razorpay advance order error:', err);
-    res.status(500).json({ error: 'Failed to create payment order: ' + (err.error?.description || err.message) });
-  }
-};
+    const redirectUrl = `${backendUrl}/api/maintenance/advance/phonepe-callback?order_row_id=${orderRow.id}&txn_id=${merchantTransactionId}`;
 
-// GET /maintenance/advance/checkout/:order_id
-// Serves HTML checkout page — no auth (opened in browser)
-exports.advancePaymentCheckout = (req, res) => {
-  const { order_id } = req.params;
-  const { order_row_id, amount, key, society, months, monthly } = req.query;
-  const backendUrl = process.env.BACKEND_URL || '';
-  const callbackUrl = `${backendUrl}/api/maintenance/advance/callback?order_row_id=${order_row_id}`;
-  const societyName = decodeURIComponent(society || 'Society');
-  const numMonths = parseInt(months || '1');
-  const monthlyAmt = parseFloat(monthly || '0');
-  const totalAmt = Math.round(Number(amount) / 100);
+    const phonepeResponse = await generatePaymentRequest({
+      merchantTransactionId,
+      amount: total_amount, // already in rupees
+      userId: user_id,
+      mobileNumber: userRow?.phone || "9999999999",
+      redirectUrl
+    });
 
-  res.setHeader('Content-Type', 'text/html');
-  res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-  <title>My Building — Advance Payment</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, sans-serif; background: #f5f7fa; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
-    .card { background: #fff; border-radius: 16px; padding: 32px 24px; max-width: 400px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.08); text-align: center; }
-    .logo { font-size: 28px; font-weight: 800; color: #1E3A8A; margin-bottom: 4px; }
-    .society { color: #1E3A8A; font-size: 15px; font-weight: 700; background: #EFF6FF; border-radius: 8px; padding: 6px 14px; display: inline-block; margin-bottom: 16px; }
-    .subtitle { color: #6B7280; font-size: 14px; margin-bottom: 20px; }
-    .advance-badge { background: #F0FDF4; border: 1px solid #86EFAC; border-radius: 8px; padding: 8px 16px; display: inline-block; margin-bottom: 16px; }
-    .advance-badge-text { color: #16A34A; font-size: 13px; font-weight: 700; }
-    .breakdown { display: flex; justify-content: space-between; font-size: 14px; color: #6B7280; margin-bottom: 6px; }
-    .amount { font-size: 36px; font-weight: 800; color: #111827; margin: 12px 0 4px; }
-    .label { font-size: 13px; color: #9CA3AF; margin-bottom: 28px; }
-    .btn { background: #1E3A8A; color: #fff; border: none; border-radius: 12px; padding: 16px 32px; font-size: 16px; font-weight: 700; cursor: pointer; width: 100%; }
-    .btn:disabled { opacity: 0.6; }
-    .status { margin-top: 20px; font-size: 14px; color: #6B7280; }
-    .secure { font-size: 12px; color: #9CA3AF; margin-top: 16px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="logo">🏢 My Building</div>
-    <div class="society">${societyName}</div>
-    <div class="subtitle">Advance Maintenance Payment</div>
-    <div class="advance-badge">
-      <span class="advance-badge-text">📅 ${numMonths} Month${numMonths > 1 ? 's' : ''} in Advance</span>
-    </div>
-    <div class="breakdown"><span>Monthly Amount</span><span>₹${monthlyAmt.toLocaleString('en-IN')}</span></div>
-    <div class="breakdown"><span>Months</span><span>× ${numMonths}</span></div>
-    <div class="amount">₹${totalAmt.toLocaleString('en-IN')}</div>
-    <div class="label">Total advance payment</div>
-    <button class="btn" id="payBtn" onclick="startPayment()">Pay Now</button>
-    <div class="status" id="status"></div>
-    <div class="secure">🔒 Secured by Razorpay · Credit applied automatically when bills are generated</div>
-  </div>
-  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-  <script>
-    function startPayment() {
-      var btn = document.getElementById('payBtn');
-      btn.disabled = true;
-      btn.textContent = 'Opening payment...';
-      var options = {
-        key: "${key}",
-        amount: ${amount},
-        currency: "INR",
-        order_id: "${order_id}",
-        name: "My Building",
-        description: "${societyName} — ${numMonths} Month Advance",
-        theme: { color: "#1E3A8A" },
-        config: {
-          display: {
-            blocks: {
-              upi: { name: "Pay via UPI", instruments: [{ method: "upi" }] },
-              other: { name: "Other Methods", instruments: [{ method: "card" }, { method: "netbanking" }, { method: "wallet" }] }
-            },
-            sequence: ["block.upi", "block.other"],
-            preferences: { show_default_blocks: true }
-          }
-        },
-        handler: function(response) {
-          document.getElementById('status').textContent = 'Verifying payment...';
-          fetch('${callbackUrl}', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              razorpay_payment_id: response.razorpay_payment_id,
-              razorpay_order_id: response.razorpay_order_id,
-              razorpay_signature: response.razorpay_signature
-            })
-          })
-          .then(function(r) { return r.json(); })
-          .then(function(data) {
-            if (data.success) {
-              document.getElementById('status').textContent = '✅ Payment successful! Credit added to your account.';
-              setTimeout(function() {
-                window.location.href = 'mybuilding://advance-payment?status=success';
-              }, 1500);
-            } else {
-              document.getElementById('status').textContent = '❌ Verification failed. Contact support.';
-              btn.disabled = false;
-              btn.textContent = 'Retry';
-            }
-          })
-          .catch(function() {
-            document.getElementById('status').textContent = '❌ Network error during verification.';
-            btn.disabled = false;
-            btn.textContent = 'Retry';
-          });
-        },
-        modal: {
-          ondismiss: function() {
-            btn.disabled = false;
-            btn.textContent = 'Pay Now';
-            window.location.href = 'mybuilding://advance-payment?status=cancelled';
-          }
-        }
-      };
-      var rzp = new Razorpay(options);
-      rzp.on('payment.failed', function(response) {
-        document.getElementById('status').textContent = '❌ ' + (response.error.description || 'Payment failed');
-        btn.disabled = false;
-        btn.textContent = 'Try Again';
+    if (phonepeResponse.success) {
+      res.json({ 
+        order_id: merchantTransactionId, 
+        checkout_url: phonepeResponse.data.instrumentResponse.redirectInfo.url, 
+        total_amount, 
+        monthly_amount, 
+        months 
       });
-      rzp.open();
+    } else {
+      res.status(500).json({ error: 'PhonePe API error: ' + phonepeResponse.message });
     }
-    window.onload = function() { startPayment(); };
-  </script>
-</body>
-</html>`);
+  } catch (err) {
+    console.error('PhonePe advance order error:', err);
+    res.status(500).json({ error: 'Failed to create payment order: ' + err.message });
+  }
 };
 
-// POST /maintenance/advance/callback
-// Verifies Razorpay signature, credits balance, inserts ledger row (idempotent)
-exports.advancePaymentCallback = async (req, res) => {
-  const { order_row_id } = req.query;
-  const { razorpay_payment_id, razorpay_order_id, razorpay_signature } = req.body;
+// PhonePe Callback
+exports.phonepeCallback = async (req, res) => {
+  const { order_row_id, txn_id } = req.query;
 
-  if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
-    return res.json({ success: false, error: 'Missing payment data' });
-  }
+  try {
+    const { checkPaymentStatus } = require('../utils/phonepeHelper');
+    const statusData = await checkPaymentStatus(txn_id);
 
-  // Verify HMAC-SHA256 signature
-  const expected = crypto
-    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-    .digest('hex');
-
-  if (expected !== razorpay_signature) {
-    return res.json({ success: false, error: 'Signature mismatch' });
-  }
+    if (statusData && statusData.code === 'PAYMENT_SUCCESS') {
+      const razorpay_payment_id = statusData.data.transactionId;
 
   // Fetch the order row
   const { data: orderRow, error: fetchErr } = await supabase
@@ -366,10 +229,17 @@ exports.advancePaymentCallback = async (req, res) => {
       }
     }
   } catch (err) {
-    console.error('[advancePaymentCallback] Post-credit settlement error:', err.message);
+    console.error('[phonepeCallback] Post-credit settlement error:', err.message);
   }
 
-  res.json({ success: true });
+  return res.redirect(`mybuilding://advance-payment?status=success`);
+    } else {
+      return res.redirect(`mybuilding://advance-payment?status=failed`);
+    }
+  } catch (err) {
+    console.error("PhonePe callback error:", err);
+    return res.redirect(`mybuilding://advance-payment?status=failed`);
+  }
 };
 
 // GET /maintenance/advance/summary

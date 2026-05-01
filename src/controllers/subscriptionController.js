@@ -1,11 +1,5 @@
 const supabase = require('../supabase');
-const Razorpay = require('razorpay');
 const crypto = require('crypto');
-
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
 
 const PLANS = {
   monthly:  { amount: 1500,   label: '₹15/month',    months: 1  },   // paise
@@ -23,13 +17,13 @@ exports.getMySubscription = async (req, res) => {
   res.json(data || null);
 };
 
-// Create Razorpay order for subscription
+// Create PhonePe order for subscription
 exports.createOrder = async (req, res) => {
   const { plan, promo_id, include_newspaper } = req.body;
   if (!PLANS[plan]) return res.status(422).json({ error: 'Invalid plan. Choose monthly, yearly or lifetime' });
 
   const planInfo = PLANS[plan];
-  let amount = planInfo.amount;
+  let amount = planInfo.amount; // paise
   // Newspaper add-on pricing based on plan type
   if (include_newspaper) {
     if (plan === 'yearly') amount += 3600; // ₹36
@@ -56,62 +50,43 @@ exports.createOrder = async (req, res) => {
   }
 
   try {
-    const order = await razorpay.orders.create({
-      amount,
-      currency: 'INR',
-      receipt: `sub_${req.user.id.slice(0, 20)}`,
-      notes: { user_id: req.user.id, plan, user_email: req.user.email, promo_id: promo_id || '', include_newspaper: include_newspaper ? '1' : '0' },
+    const { generatePaymentRequest } = require('../utils/phonepeHelper');
+    const merchantTransactionId = `SUB_${req.user.id.replace(/-/g, '')}_${Date.now()}`.substring(0, 34);
+    const backendUrl = process.env.BACKEND_URL;
+    if (!backendUrl) return res.status(500).json({ error: 'BACKEND_URL not set in .env' });
+
+    // Pass necessary metadata as query params for the callback
+    const redirectUrl = `${backendUrl}/api/subscriptions/phonepe-callback?type=subscription&plan=${plan}&user_id=${req.user.id}&promo_id=${promo_id || ''}&include_newspaper=${include_newspaper ? '1' : '0'}&txn_id=${merchantTransactionId}`;
+
+    // Convert paise to rupees for PhonePe helper (which expects rupees and converts back to paise)
+    const amountRupees = amount / 100;
+
+    const phonepeResponse = await generatePaymentRequest({
+      merchantTransactionId,
+      amount: amountRupees,
+      userId: req.user.id,
+      mobileNumber: req.user.phone || "9999999999",
+      redirectUrl
     });
-    res.json({ order_id: order.id, amount: order.amount, key: process.env.RAZORPAY_KEY_ID, plan, promo_applied: !!appliedPromo });
+
+    if (phonepeResponse.success) {
+      res.json({
+        order_id: merchantTransactionId,
+        amount,
+        checkout_url: phonepeResponse.data.instrumentResponse.redirectInfo.url,
+        plan,
+        promo_applied: !!appliedPromo
+      });
+    } else {
+      res.status(500).json({ error: 'PhonePe API error: ' + phonepeResponse.message });
+    }
   } catch (err) {
-    res.status(500).json({ error: 'Failed to create order: ' + (err.error?.description || err.message) });
+    console.error('PhonePe order error:', err);
+    res.status(500).json({ error: 'Failed to create order: ' + err.message });
   }
 };
 
-// Verify payment and activate subscription
-exports.verifyAndActivate = async (req, res) => {
-  const { razorpay_order_id, razorpay_payment_id, razorpay_signature, plan } = req.body;
 
-  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !PLANS[plan])
-    return res.status(422).json({ error: 'Missing required fields' });
-
-  // Verify signature
-  const expected = crypto
-    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-    .digest('hex');
-
-  if (expected !== razorpay_signature)
-    return res.status(400).json({ error: 'Payment verification failed' });
-
-  const now = new Date();
-  const expires_at = plan === 'lifetime' ? null
-    : new Date(now.getFullYear(), now.getMonth() + (PLANS[plan].months || 1), now.getDate()).toISOString();
-
-  // Upsert subscription
-  const { data: existing } = await supabase
-    .from('subscriptions').select('id').eq('user_id', req.user.id).single();
-
-  const payload = {
-    user_id: req.user.id,
-    plan,
-    status: 'active',
-    started_at: now.toISOString(),
-    expires_at,
-    razorpay_payment_id,
-    razorpay_order_id,
-  };
-
-  let error;
-  if (existing) {
-    ({ error } = await supabase.from('subscriptions').update(payload).eq('user_id', req.user.id));
-  } else {
-    ({ error } = await supabase.from('subscriptions').insert(payload));
-  }
-
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ message: 'Subscription activated', plan, expires_at });
-};
 
 // Admin: grant free subscription manually
 exports.adminGrant = async (req, res) => {
@@ -187,188 +162,89 @@ exports.requireSubscription = async (req, res, next) => {
   next();
 };
 
-// Serve Razorpay checkout HTML for subscription
-exports.checkoutPage = (req, res) => {
-  const { order_id } = req.params;
-  const { amount, key, plan, user_id } = req.query;
-  const callbackUrl = `/api/subscriptions/callback?plan=${plan}&user_id=${user_id}`;
-  const planLabel = plan === 'lifetime' ? '₹1,500 Lifetime' : plan === 'yearly' ? '₹180/year' : plan === 'newspaper_addon' ? '₹3 Newspaper Add-On' : '₹15/month';
+// Callback from PhonePe for Subscription or Newspaper Add-on
+exports.phonepeCallback = async (req, res) => {
+  const { type, plan, user_id, promo_id, include_newspaper, txn_id } = req.query;
 
-  res.setHeader('Content-Type', 'text/html');
-  res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-  <title>My Building — Subscribe</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, sans-serif; background: #f5f7fa; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
-    .card { background: #fff; border-radius: 16px; padding: 32px 24px; max-width: 400px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.08); text-align: center; }
-    .logo { font-size: 40px; margin-bottom: 8px; }
-    .title { font-size: 22px; font-weight: 800; color: #1E3A8A; margin-bottom: 4px; }
-    .plan { background: #EFF6FF; color: #1E3A8A; font-weight: 700; border-radius: 8px; padding: 6px 14px; display: inline-block; margin-bottom: 20px; }
-    .amount { font-size: 36px; font-weight: 800; color: #111827; margin-bottom: 24px; }
-    .btn { background: #1E3A8A; color: #fff; border: none; border-radius: 12px; padding: 16px 32px; font-size: 16px; font-weight: 700; cursor: pointer; width: 100%; }
-    .btn:disabled { opacity: 0.6; }
-    .status { margin-top: 20px; font-size: 14px; color: #6B7280; }
-    .secure { font-size: 12px; color: #9CA3AF; margin-top: 12px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="logo">🏢</div>
-    <div class="title">My Building</div>
-    <div class="plan">${planLabel}</div>
-    <div class="amount">₹${Math.round(Number(amount) / 100).toLocaleString('en-IN')}</div>
-    <button class="btn" id="payBtn" onclick="startPayment()">Pay Now</button>
-    <div class="status" id="status"></div>
-    <div class="secure">🔒 Secured by Razorpay</div>
-  </div>
-  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-  <script>
-    function startPayment() {
-      var btn = document.getElementById('payBtn');
-      btn.disabled = true; btn.textContent = 'Opening...';
-      var options = {
-        key: "${key}", amount: ${amount}, currency: "INR",
-        order_id: "${order_id}", name: "My Building",
-        description: "${planLabel} Subscription",
-        theme: { color: "#1E3A8A" },
-        config: {
-          display: {
-            blocks: {
-              upi: { name: "Pay via UPI", instruments: [{ method: "upi" }] },
-              other: { name: "Other Methods", instruments: [{ method: "card" }, { method: "netbanking" }, { method: "wallet" }] }
-            },
-            sequence: ["block.upi", "block.other"],
-            preferences: { show_default_blocks: true }
-          }
-        },
-        handler: function(response) {
-          document.getElementById('status').textContent = 'Activating subscription...';
-          fetch('${callbackUrl}', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              razorpay_payment_id: response.razorpay_payment_id,
-              razorpay_order_id: response.razorpay_order_id,
-              razorpay_signature: response.razorpay_signature
-            })
-          })
-          .then(r => r.json())
-          .then(data => {
-            if (data.success) {
-              document.getElementById('status').textContent = '✅ Subscription activated!';
-              setTimeout(() => { window.location.href = 'mybuilding://subscription?status=success'; }, 1500);
-            } else {
-              document.getElementById('status').textContent = '❌ ' + (data.error || 'Activation failed');
-              btn.disabled = false; btn.textContent = 'Retry';
-            }
-          })
-          .catch(() => {
-            document.getElementById('status').textContent = '❌ Network error';
-            btn.disabled = false; btn.textContent = 'Retry';
-          });
-        },
-        modal: { ondismiss: function() { btn.disabled = false; btn.textContent = 'Pay Now'; window.location.href = 'mybuilding://subscription?status=cancelled'; } }
-      };
-      var rzp = new Razorpay(options);
-      rzp.on('payment.failed', function(r) {
-        document.getElementById('status').textContent = '❌ ' + (r.error.description || 'Payment failed');
-        btn.disabled = false; btn.textContent = 'Try Again';
-      });
-      rzp.open();
-    }
-    window.onload = function() { startPayment(); };
-  </script>
-</body>
-</html>`);
-};
-
-// Callback from checkout page
-exports.paymentCallback = async (req, res) => {
-  const { plan, user_id } = req.query;
-  const { razorpay_payment_id, razorpay_order_id, razorpay_signature } = req.body;
-
-  if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature)
-    return res.json({ success: false, error: 'Missing payment data' });
-
-  const expected = crypto
-    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-    .digest('hex');
-
-  if (expected !== razorpay_signature)
-    return res.json({ success: false, error: 'Signature mismatch' });
-
-  // Handle newspaper add-on only payment
-  if (plan === 'newspaper_addon') {
-    const { error } = await supabase
-      .from('subscriptions')
-      .update({ newspaper_addon: true })
-      .eq('user_id', user_id);
-    if (error) return res.json({ success: false, error: error.message });
-    return res.json({ success: true });
-  }
-
-  const now = new Date();
-  const expires_at = plan === 'lifetime' ? null
-    : new Date(now.getFullYear(), now.getMonth() + (PLANS[plan]?.months || 1), now.getDate()).toISOString();
-
-  const { data: existing } = await supabase
-    .from('subscriptions').select('id').eq('user_id', user_id).single();
-
-  const payload = { user_id, plan, status: 'active', started_at: now.toISOString(), expires_at, razorpay_payment_id, razorpay_order_id };
-
-  let error;
-  if (existing) {
-    ({ error } = await supabase.from('subscriptions').update(payload).eq('user_id', user_id));
-  } else {
-    ({ error } = await supabase.from('subscriptions').insert(payload));
-  }
-
-  if (error) return res.json({ success: false, error: error.message });
-
-  // Activate newspaper add-on if included
   try {
-    const orderDetails = await razorpay.orders.fetch(razorpay_order_id);
-    const include_newspaper = orderDetails?.notes?.include_newspaper === '1';
-    if (include_newspaper) {
-      await supabase.from('subscriptions').update({ newspaper_addon: true }).eq('user_id', user_id);
-    }
-  } catch {}
+    const { checkPaymentStatus } = require('../utils/phonepeHelper');
+    const statusData = await checkPaymentStatus(txn_id);
 
-  // Mark promo as used — get promo_id from the Razorpay order notes
-  try {
-    const orderDetails = await razorpay.orders.fetch(razorpay_order_id);
-    const promo_id = orderDetails?.notes?.promo_id;
-    if (promo_id) {
-      const { markPromoUsed } = require('./promoController');
-      await markPromoUsed(promo_id, user_id);
-      // Store promo code and paid amount on subscription
-      const { data: promo } = await supabase.from('promo_codes').select('code').eq('id', promo_id).single();
-      const paidAmountRupees = Math.round(Number(orderDetails.amount) / 100);
-      await supabase.from('subscriptions').update({
-        paid_amount: paidAmountRupees,
-        promo_code_used: promo?.code || null,
-      }).eq('user_id', user_id);
+    if (statusData && statusData.code === 'PAYMENT_SUCCESS') {
+      const phonepe_payment_id = statusData.data.transactionId;
+
+      if (type === 'newspaper_addon') {
+        // Just enabling newspaper addon
+        const { error } = await supabase
+          .from('subscriptions')
+          .update({ newspaper_addon: true })
+          .eq('user_id', user_id);
+        
+        return res.redirect(`mybuilding://subscription?status=success`);
+      } else {
+        // Subscription activation
+        const now = new Date();
+        const expires_at = plan === 'lifetime' ? null
+          : new Date(now.getFullYear(), now.getMonth() + (PLANS[plan]?.months || 1), now.getDate()).toISOString();
+
+        const { data: existing } = await supabase
+          .from('subscriptions').select('id').eq('user_id', user_id).single();
+
+        const payload = { 
+          user_id, 
+          plan, 
+          status: 'active', 
+          started_at: now.toISOString(), 
+          expires_at, 
+          razorpay_payment_id: phonepe_payment_id, 
+          razorpay_order_id: txn_id 
+        };
+
+        if (existing) {
+          await supabase.from('subscriptions').update(payload).eq('user_id', user_id);
+        } else {
+          await supabase.from('subscriptions').insert(payload);
+        }
+
+        // Activate newspaper add-on if included
+        if (include_newspaper === '1') {
+          await supabase.from('subscriptions').update({ newspaper_addon: true }).eq('user_id', user_id);
+        }
+
+        // Mark promo as used
+        if (promo_id) {
+          const { markPromoUsed } = require('./promoController');
+          await markPromoUsed(promo_id, user_id);
+          const { data: promo } = await supabase.from('promo_codes').select('code').eq('id', promo_id).single();
+          const paidAmountRupees = Math.round(Number(statusData.data.amount) / 100);
+          await supabase.from('subscriptions').update({
+            paid_amount: paidAmountRupees,
+            promo_code_used: promo?.code || null,
+          }).eq('user_id', user_id);
+        } else {
+          const PLAN_PRICES = { monthly: 15, yearly: 180, lifetime: 1500 };
+          await supabase.from('subscriptions').update({
+            paid_amount: PLAN_PRICES[plan] || null,
+            promo_code_used: null,
+          }).eq('user_id', user_id);
+        }
+
+        return res.redirect(`mybuilding://subscription?status=success`);
+      }
     } else {
-      // No promo — store full plan price
-      const PLAN_PRICES = { monthly: 15, yearly: 180, lifetime: 1500 };
-      await supabase.from('subscriptions').update({
-        paid_amount: PLAN_PRICES[plan] || null,
-        promo_code_used: null,
-      }).eq('user_id', user_id);
+      return res.redirect(`mybuilding://subscription?status=failed`);
     }
-  } catch {}
-
-  res.json({ success: true });
+  } catch (err) {
+    console.error("PhonePe callback error:", err);
+    return res.redirect(`mybuilding://subscription?status=failed`);
+  }
 };
 
 // ── Newspaper Add-On ─────────────────────────────────────────────────────────
 
 const NEWSPAPER_ADDON_AMOUNT = 300; // ₹3 in paise
 
-// Create Razorpay order for newspaper add-on
+// Create PhonePe order for newspaper add-on
 exports.createNewspaperAddonOrder = async (req, res) => {
   // Must have an active subscription
   const { data: sub } = await supabase
@@ -384,47 +260,38 @@ exports.createNewspaperAddonOrder = async (req, res) => {
     return res.status(400).json({ error: 'Newspaper add-on is already active' });
   }
 
-  let addonAmount = 300; // default ₹3
-  if (sub.plan === 'yearly') addonAmount = 3600; // ₹36
-  else if (sub.plan === 'lifetime') addonAmount = 50000; // ₹500
+  let addonAmount = 300; // paise
+  if (sub.plan === 'yearly') addonAmount = 3600; 
+  else if (sub.plan === 'lifetime') addonAmount = 50000; 
 
   try {
-    const order = await razorpay.orders.create({
-      amount: addonAmount,
-      currency: 'INR',
-      receipt: `news_${req.user.id.slice(0, 20)}`,
-      notes: { user_id: req.user.id, type: 'newspaper_addon' },
+    const { generatePaymentRequest } = require('../utils/phonepeHelper');
+    const merchantTransactionId = `NEWS_${req.user.id.replace(/-/g, '')}_${Date.now()}`.substring(0, 34);
+    const backendUrl = process.env.BACKEND_URL;
+    
+    const redirectUrl = `${backendUrl}/api/subscriptions/phonepe-callback?type=newspaper_addon&user_id=${req.user.id}&txn_id=${merchantTransactionId}`;
+    const amountRupees = addonAmount / 100;
+
+    const phonepeResponse = await generatePaymentRequest({
+      merchantTransactionId,
+      amount: amountRupees,
+      userId: req.user.id,
+      mobileNumber: req.user.phone || "9999999999",
+      redirectUrl
     });
-    res.json({ order_id: order.id, amount: order.amount, key: process.env.RAZORPAY_KEY_ID });
+
+    if (phonepeResponse.success) {
+      res.json({
+        order_id: merchantTransactionId,
+        amount: addonAmount,
+        checkout_url: phonepeResponse.data.instrumentResponse.redirectInfo.url
+      });
+    } else {
+      res.status(500).json({ error: 'PhonePe API error: ' + phonepeResponse.message });
+    }
   } catch (err) {
-    res.status(500).json({ error: 'Failed to create order: ' + (err.error?.description || err.message) });
+    res.status(500).json({ error: 'Failed to create order: ' + err.message });
   }
-};
-
-// Callback after ₹3 newspaper add-on payment
-exports.newspaperAddonCallback = async (req, res) => {
-  const { razorpay_payment_id, razorpay_order_id, razorpay_signature, user_id } = req.body;
-
-  if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature || !user_id) {
-    return res.json({ success: false, error: 'Missing payment data' });
-  }
-
-  const expected = crypto
-    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-    .digest('hex');
-
-  if (expected !== razorpay_signature) {
-    return res.json({ success: false, error: 'Signature mismatch' });
-  }
-
-  const { error } = await supabase
-    .from('subscriptions')
-    .update({ newspaper_addon: true })
-    .eq('user_id', user_id);
-
-  if (error) return res.json({ success: false, error: error.message });
-  res.json({ success: true });
 };
 
 // Toggle newspaper add-on off (no refund — just disable)
