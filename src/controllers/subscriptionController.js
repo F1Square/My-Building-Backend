@@ -26,8 +26,8 @@ exports.createOrder = async (req, res) => {
   let amount = planInfo.amount; // paise
   // Newspaper add-on pricing based on plan type
   if (include_newspaper) {
-    if (plan === 'yearly') amount += 3600; // ₹36
-    else if (plan === 'lifetime') amount += 50000; // ₹500
+    if (plan === 'lifetime') return res.status(400).json({ error: 'Newspaper add-on is not available for lifetime plan' });
+    else if (plan === 'yearly') amount += 3600; // ₹36
     else amount += 300; // ₹3
   }
   let appliedPromo = null;
@@ -260,15 +260,28 @@ exports.createNewspaperAddonOrder = async (req, res) => {
     return res.status(400).json({ error: 'Newspaper add-on is already active' });
   }
 
-  let addonAmount = 300; // paise
-  if (sub.plan === 'yearly') addonAmount = 3600; 
-  else if (sub.plan === 'lifetime') addonAmount = 50000; 
+  const { plan: requestedPlan } = req.body;
+  const addonPlan = requestedPlan || sub.plan;
+  
+  const ADDON_PRICES = {
+    monthly: 300,   // ₹3
+    yearly: 3600,   // ₹36
+  };
+
+  if (!ADDON_PRICES[addonPlan]) {
+    return res.status(422).json({ error: 'Invalid newspaper plan. Choose monthly or yearly' });
+  }
+
+  const addonAmount = ADDON_PRICES[addonPlan];
 
   try {
     const { generatePaymentRequest } = require('../utils/phonepeHelper');
     const merchantTransactionId = `NEWS_${req.user.id.replace(/-/g, '')}_${Date.now()}`.substring(0, 34);
     const backendUrl = process.env.BACKEND_URL;
+    if (!backendUrl) return res.status(500).json({ error: 'BACKEND_URL not set in .env' });
     
+    // Pass the selected plan to callback so we know what duration to set (though currently it's just a boolean)
+    // In future, we could store newspaper_expires_at separately.
     const redirectUrl = `${backendUrl}/api/subscriptions/phonepe-callback?type=newspaper_addon&user_id=${req.user.id}&txn_id=${merchantTransactionId}`;
     const amountRupees = addonAmount / 100;
 
@@ -290,7 +303,8 @@ exports.createNewspaperAddonOrder = async (req, res) => {
       res.status(500).json({ error: 'PhonePe API error: ' + phonepeResponse.message });
     }
   } catch (err) {
-    res.status(500).json({ error: 'Failed to create order: ' + err.message });
+    console.error('Newspaper add-on order error:', err.response?.data || err.message || err);
+    res.status(500).json({ error: 'Failed to create order: ' + (err.response?.data?.message || err.message) });
   }
 };
 

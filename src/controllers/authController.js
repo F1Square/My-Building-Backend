@@ -42,15 +42,24 @@ exports.unifiedLogin = async (req, res) => {
 
   // 1. Check if admin
   if (normalizedEmail === process.env.ADMIN_EMAIL?.toLowerCase().trim()) {
-    if (password !== process.env.ADMIN_PASSWORD)
-      return res.status(401).json({ error: 'Invalid credentials' });
-
     // Ensure admin has a real UUID row in users table
     let { data: adminUser } = await supabase
       .from('users')
-      .select('id, name, email, role')
+      .select('id, name, email, role, password_hash')
       .eq('email', normalizedEmail)
       .single();
+
+    let valid = false;
+    if (adminUser && adminUser.password_hash && adminUser.password_hash !== 'admin-no-direct-login') {
+      valid = await bcrypt.compare(password, adminUser.password_hash);
+    }
+    if (!valid && password === process.env.ADMIN_PASSWORD) {
+      valid = true;
+    }
+
+    if (!valid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
 
     if (!adminUser) {
       const { data: created, error: createErr } = await supabase
@@ -297,9 +306,13 @@ exports.resetPassword = async (req, res) => {
 
   const hash = await bcrypt.hash(new_password, 12);
 
-  // Handle admin separately (no DB password)
+  // Handle admin separately (ensure they exist in DB)
   if (payload.email === process.env.ADMIN_EMAIL?.toLowerCase().trim()) {
-    return res.status(400).json({ error: 'Admin password must be changed in the server .env file' });
+    const { data: adminUser } = await supabase.from('users').select('id').eq('email', payload.email).single();
+    if (!adminUser) {
+      await supabase.from('users').insert({ name: 'Admin', email: payload.email, role: 'admin', status: 'approved', password_hash: hash });
+      return res.json({ message: 'Password reset successfully. You can now log in.' });
+    }
   }
 
   const { error } = await supabase.from('users').update({ password_hash: hash }).eq('email', payload.email);

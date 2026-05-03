@@ -8,13 +8,31 @@ const IFSC_RE = /^[A-Z]{4}0[A-Z0-9]{6}$/;
 
 // Admin: create building only (no pramukh)
 exports.createBuildingOnly = async (req, res) => {
-  const { name, address } = req.body;
+  const {
+    name, address,
+    has_wings, wings, late_fees_enabled, late_fees_amount,
+    water_reading_enabled, payment_methods
+  } = req.body;
+
   if (!name?.trim()) return res.status(400).json({ error: 'Building name is required' });
   if (name.trim().length > 150) return res.status(422).json({ error: 'Building name must not exceed 150 characters' });
   if (address && address.trim().length > 300) return res.status(422).json({ error: 'Address must not exceed 300 characters' });
-  const { v4: uuidv4 } = require('uuid');
+
   const building_id = uuidv4();
-  const { error } = await supabase.from('buildings').insert({ id: building_id, name: name.trim(), address: address?.trim() });
+
+  const payload = {
+    id: building_id,
+    name: name.trim(),
+    address: address?.trim() || null,
+    has_wings: !!has_wings,
+    wings: has_wings ? wings?.trim() || null : null,
+    late_fees_enabled: !!late_fees_enabled,
+    late_fees_amount: late_fees_enabled ? Number(late_fees_amount) : null,
+    water_reading_enabled: !!water_reading_enabled,
+    payment_method: Array.isArray(payment_methods) ? payment_methods.join(', ') : 'Online'
+  };
+
+  const { error } = await supabase.from('buildings').insert(payload);
   if (error) return res.status(400).json({ error: error.message });
   res.status(201).json({ message: 'Building created', building_id });
 };
@@ -125,7 +143,45 @@ exports.handleJoinRequest = async (req, res) => {
 
 // Get all buildings (admin)
 exports.getAllBuildings = async (req, res) => {
-  const { data, error } = await supabase.from('buildings').select('*');
+  // 1. Fetch all buildings
+  const { data: buildings, error: bErr } = await supabase.from('buildings').select('*').order('created_at', { ascending: false });
+  if (bErr) return res.status(400).json({ error: bErr.message });
+
+  // 2. Fetch users to get pramukh name and member counts
+  const { data: users, error: uErr } = await supabase.from('users').select('id, name, role, building_id');
+  if (uErr) return res.status(400).json({ error: uErr.message });
+
+  // 3. Fetch subscriptions for pramukhs
+  const pramukhIds = users.filter(u => u.role === 'pramukh').map(u => u.id);
+  const { data: subs, error: sErr } = await supabase.from('subscriptions').select('user_id, status').in('user_id', pramukhIds);
+  if (sErr) return res.status(400).json({ error: sErr.message });
+
+  // 4. Enrich buildings data
+  const enriched = buildings.map(b => {
+    const bUsers = users.filter(u => u.building_id === b.id);
+    const pramukh = bUsers.find(u => u.role === 'pramukh');
+    const sub = subs.find(s => s.user_id === pramukh?.id);
+
+    return {
+      ...b,
+      pramukh_name: pramukh?.name || null,
+      member_count: bUsers.length,
+      subscription_status: sub?.status || 'inactive'
+    };
+  });
+
+  res.json(enriched);
+};
+
+// Search buildings by name for users joining
+exports.searchBuildings = async (req, res) => {
+  const { query } = req.query;
+  if (!query || query.trim().length < 2) return res.json([]);
+  const { data, error } = await supabase
+    .from('buildings')
+    .select('id, name, address')
+    .ilike('name', `%${query.trim()}%`)
+    .limit(10);
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);
 };
@@ -221,9 +277,9 @@ exports.getAllUsers = async (req, res) => {
   // Client-side search filter
   const result = search
     ? data.filter((u) =>
-        u.name?.toLowerCase().includes(search.toLowerCase()) ||
-        u.email?.toLowerCase().includes(search.toLowerCase())
-      )
+      u.name?.toLowerCase().includes(search.toLowerCase()) ||
+      u.email?.toLowerCase().includes(search.toLowerCase())
+    )
     : data;
 
   res.json(result);
@@ -268,7 +324,7 @@ exports.getMyBuilding = async (req, res) => {
   if (!building_id) return res.status(404).json({ error: 'No building associated' });
   const { data, error } = await supabase
     .from('buildings')
-    .select('id, name, address, society_logo, payment_method, payment_tc, created_at')
+    .select('id, name, address, society_logo, payment_method, payment_tc, has_wings, wings, late_fees_enabled, late_fees_amount, water_reading_enabled, created_at')
     .eq('id', building_id)
     .single();
   if (error || !data) return res.status(404).json({ error: 'Building not found' });

@@ -10,6 +10,7 @@ router.delete('/bills/:id', authenticate, requireRole('admin'), c.deleteBill);
 router.get('/bills', authenticate, c.getBills);
 router.get('/payments', authenticate, c.getPaymentRecords);
 router.patch('/payments/:id/receipt', authenticate, requireRole('user', 'pramukh'), c.uploadReceipt);
+router.patch('/payments/:id/approve', authenticate, requireRole('pramukh', 'admin'), c.approvePayment);
 
 // Upload receipt image endpoint
 router.post('/upload-receipt', 

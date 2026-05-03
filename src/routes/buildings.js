@@ -7,6 +7,7 @@ router.post('/create', authenticate, requireRole('admin'), c.createBuildingOnly)
 router.post('/pramukh', authenticate, requireRole('admin'), c.createPramukh);
 router.get('/my', authenticate, c.getMyBuilding);
 router.get('/', authenticate, requireRole('admin'), c.getAllBuildings);
+router.get('/search', authenticate, c.searchBuildings);
 router.post('/join', authenticate, requireRole('user'), c.requestJoin);
 router.post('/join/handle', authenticate, requireRole('pramukh'), c.handleJoinRequest);
 router.get('/members/:building_id?', authenticate, requireRole('pramukh', 'admin', 'user'), c.getBuildingMembers);

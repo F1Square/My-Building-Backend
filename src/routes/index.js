@@ -4,6 +4,8 @@ const router = express.Router();
 // Activity logger runs here — after JWT auth middleware has set req.user
 router.use(require('../middleware/activityLog'));
 
+router.use('/app-config', require('./appConfig'));
+
 router.use('/auth', require('./auth'));
 router.use('/buildings', require('./buildings'));
 router.use('/visitors', require('./visitors'));

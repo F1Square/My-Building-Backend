@@ -437,12 +437,15 @@ exports.uploadReceiptImage = async (req, res) => {
       publicId: `receipt_${payment_record_id}`
     });
 
-    // Update payment record with receipt URL
+    // Update payment record with receipt URL and payment method
+    const { payment_method } = req.body;
     const { error } = await supabase
       .from('maintenance_payments')
       .update({
         receipt_url: result.secure_url,
-        status: 'receipt_uploaded'
+        cheque_photo_url: payment_method?.toLowerCase() === 'cheque' ? result.secure_url : null,
+        status: 'receipt_uploaded',
+        payment_method: payment_method?.toLowerCase() || 'online'
       })
       .eq('id', payment_record_id);
 
@@ -476,8 +479,7 @@ exports.uploadReceiptImage = async (req, res) => {
 
 // User/Pramukh: upload transaction receipt for a pending payment
 exports.uploadReceipt = async (req, res) => {
-  const { id } = req.params;
-  const { receipt_url } = req.body;
+  const { receipt_url, payment_method } = req.body;
   if (!receipt_url) return res.status(422).json({ error: 'receipt_url is required' });
 
   const { data: record } = await supabase
@@ -492,11 +494,49 @@ exports.uploadReceipt = async (req, res) => {
 
   const { error } = await supabase
     .from('maintenance_payments')
-    .update({ receipt_url, status: 'receipt_uploaded' })
+    .update({ 
+      receipt_url, 
+      status: 'receipt_uploaded',
+      payment_method: payment_method?.toLowerCase() || 'online'
+    })
     .eq('id', id);
 
   if (error) return res.status(400).json({ error: error.message });
   res.json({ message: 'Receipt uploaded', status: 'receipt_uploaded' });
+};
+
+// Pramukh/Admin: Approve manual payment (cash/cheque)
+exports.approvePayment = async (req, res) => {
+  const { id } = req.params;
+  
+  const { data: record, error: fetchErr } = await supabase
+    .from('maintenance_payments')
+    .select('*, maintenance_bills(month, year, amount), users!maintenance_payments_user_id_fkey(name, role)')
+    .eq('id', id)
+    .single();
+
+  if (fetchErr || !record) return res.status(404).json({ error: 'Payment record not found' });
+  if (record.status === 'paid') return res.status(400).json({ error: 'Payment already completed' });
+  
+  // Scope check
+  if (req.user.role === 'pramukh' && record.building_id !== req.user.building_id)
+    return res.status(403).json({ error: 'Access denied' });
+
+  const { error } = await supabase
+    .from('maintenance_payments')
+    .update({ 
+      status: 'paid',
+      paid_at: new Date().toISOString(),
+      razorpay_payment_id: `MANUAL_${Date.now()}` // Identifier for manual payments
+    })
+    .eq('id', id);
+
+  if (error) return res.status(400).json({ error: error.message });
+
+  const { addMaintenanceExpense } = require('./expensesController');
+  try { await addMaintenanceExpense(id); } catch(e) {}
+
+  res.json({ message: 'Payment approved', status: 'paid' });
 };
 
 // User/Pramukh: create PhonePe order + return checkout URL
