@@ -34,3 +34,23 @@ exports.getAppConfig = async (req, res) => {
     });
   }
 };
+
+exports.updateAppConfig = async (req, res) => {
+  const { key, value } = req.body;
+
+  if (!key || value === undefined) {
+    return res.status(422).json({ error: 'Key and value are required' });
+  }
+
+  try {
+    const { error } = await supabase
+      .from('app_config')
+      .upsert({ key, value }, { onConflict: 'key' });
+
+    if (error) throw error;
+
+    res.json({ message: `Updated ${key} successfully` });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
