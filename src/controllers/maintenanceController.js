@@ -492,10 +492,20 @@ exports.uploadReceipt = async (req, res) => {
   if (record.user_id !== req.user.id) return res.status(403).json({ error: 'Access denied' });
   if (record.status === 'paid') return res.status(400).json({ error: 'Payment already completed' });
 
+  let finalReceiptUrl = receipt_url;
+  if (receipt_url && receipt_url.startsWith('data:image')) {
+    try {
+      const uploadRes = await uploadImage(receipt_url, { folder: 'receipts' });
+      finalReceiptUrl = uploadRes.secure_url;
+    } catch (err) {
+      console.error('Receipt auto-upload failed:', err);
+    }
+  }
+
   const { error } = await supabase
     .from('maintenance_payments')
     .update({ 
-      receipt_url, 
+      receipt_url: finalReceiptUrl, 
       status: 'receipt_uploaded',
       payment_method: payment_method?.toLowerCase() || 'online'
     })

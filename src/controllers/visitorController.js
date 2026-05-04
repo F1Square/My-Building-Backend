@@ -47,9 +47,19 @@ exports.addVisitor = async (req, res) => {
   if (phone && !/^[6-9]\d{9}$/.test(phone.trim())) return res.status(422).json({ error: 'Phone must be a valid 10-digit Indian mobile number' });
   if (purpose && purpose.trim().length > 500) return res.status(422).json({ error: 'Purpose must not exceed 500 characters' });
 
+  let finalPhotoUrl = photo_url;
+  if (photo_url && photo_url.startsWith('data:image')) {
+    try {
+      const uploadRes = await uploadImage(photo_url, { folder: 'visitors' });
+      finalPhotoUrl = uploadRes.secure_url;
+    } catch (err) {
+      console.error('Visitor auto-upload failed:', err);
+    }
+  }
+
   const { data, error } = await supabase
     .from('visitors')
-    .insert({ name, phone, purpose, flat_no, building_id, photo_url, logged_by: req.user.id, entry_type: 'watchman' })
+    .insert({ name, phone, purpose, flat_no, building_id, photo_url: finalPhotoUrl, logged_by: req.user.id, entry_type: 'watchman' })
     .select().single();
 
   if (error) return res.status(400).json({ error: error.message });

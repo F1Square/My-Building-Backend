@@ -44,9 +44,20 @@ exports.createComplaint = async (req, res) => {
   if (!title?.trim()) return res.status(422).json({ error: 'Title is required' });
   if (!building_id) return res.status(400).json({ error: 'You must be part of a building to raise a complaint' });
 
+  let finalPhotoUrl = photo_url;
+  if (photo_url && photo_url.startsWith('data:image')) {
+    try {
+      const uploadRes = await uploadImage(photo_url, { folder: 'complaints' });
+      finalPhotoUrl = uploadRes.secure_url;
+    } catch (err) {
+      console.error('Complaint auto-upload failed:', err);
+      // Fallback to original url if upload fails (though it might be a large string)
+    }
+  }
+
   const { data, error } = await supabase
     .from('complaints')
-    .insert({ user_id, building_id, title: title.trim(), description: description?.trim(), category, photo_url })
+    .insert({ user_id, building_id, title: title.trim(), description: description?.trim(), category, photo_url: finalPhotoUrl })
     .select('*, users(name, flat_no, wing)')
     .single();
 
