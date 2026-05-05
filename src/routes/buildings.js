@@ -19,5 +19,6 @@ router.post('/bank-details', authenticate, requireRole('admin'), c.saveBankDetai
 router.get('/admin/users', authenticate, requireRole('admin'), c.getAllUsers);
 router.post('/admin/users', authenticate, requireRole('admin'), c.adminCreateUser);
 router.delete('/admin/users/:user_id', authenticate, requireRole('admin'), c.adminDeleteUser);
+router.delete('/:id', authenticate, requireRole('admin'), c.deleteBuilding);
 
 module.exports = router;

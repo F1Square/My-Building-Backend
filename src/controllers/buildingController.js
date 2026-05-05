@@ -395,3 +395,75 @@ exports.saveBankDetails = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
   res.json({ message: 'Bank details saved', ...payload });
 };
+
+// Admin: delete building and all related data
+exports.deleteBuilding = async (req, res) => {
+  const { id } = req.params;
+  if (!id) return res.status(400).json({ error: 'Building ID is required' });
+
+  try {
+    console.log(`[Admin] Starting deep delete for building: ${id}`);
+
+    // 1. Get all user IDs for this building to clean up user-linked tables without building_id
+    const { data: buildingUsers } = await supabase.from('users').select('id').eq('building_id', id);
+    const userIds = buildingUsers?.map(u => u.id) || [];
+
+    // 2. Phase 1: Parallelize deletion of all data that has building_id
+    // This covers ~90% of related records
+    const buildingScopedDeletes = [
+      supabase.from('maintenance_payments').delete().eq('building_id', id),
+      supabase.from('maintenance_bills').delete().eq('building_id', id),
+      supabase.from('maintenance_requests').delete().eq('building_id', id),
+      supabase.from('complaints').delete().eq('building_id', id),
+      supabase.from('visitors').delete().eq('building_id', id),
+      supabase.from('vehicles').delete().eq('building_id', id),
+      supabase.from('parking_reports').delete().eq('building_id', id),
+      supabase.from('chats').delete().eq('building_id', id),
+      supabase.from('meetings').delete().eq('building_id', id),
+      supabase.from('society_funds').delete().eq('building_id', id),
+      supabase.from('expense_entries').delete().eq('building_id', id),
+      supabase.from('expense_edit_logs').delete().eq('building_id', id),
+      supabase.from('society_rules').delete().eq('building_id', id),
+      supabase.from('helpline_numbers').delete().eq('building_id', id),
+      supabase.from('building_bank_details').delete().eq('building_id', id),
+      supabase.from('advance_payment_orders').delete().eq('building_id', id),
+      supabase.from('advance_credit_balance').delete().eq('building_id', id),
+      supabase.from('advance_credit_ledger').delete().eq('building_id', id),
+      supabase.from('join_requests').delete().eq('building_id', id),
+      supabase.from('announcements').delete().eq('building_id', id),
+      supabase.from('building_inquiries').delete().eq('id', id),
+      supabase.from('referrals').delete().eq('inquiry_id', id)
+    ];
+
+    await Promise.all(buildingScopedDeletes);
+
+    // 3. Phase 2: Delete user-specific records that don't have building_id
+    // These tables reference users(id) and must be cleared before users can be deleted
+    if (userIds.length > 0) {
+      console.log(`[Admin] Cleaning up user-linked tables for ${userIds.length} users...`);
+      const userScopedDeletes = [
+        supabase.from('subscriptions').delete().in('user_id', userIds),
+        supabase.from('notifications').delete().in('user_id', userIds),
+        // Add any other user-specific tables here
+      ];
+      await Promise.all(userScopedDeletes);
+    }
+
+    // 4. Phase 3: Delete users (Now safe because all references are gone)
+    const { error: uErr } = await supabase.from('users').delete().eq('building_id', id);
+    if (uErr) {
+      console.error('Error deleting users:', uErr);
+      throw uErr;
+    }
+
+    // 5. Final Phase: Delete the building
+    const { error: bErr } = await supabase.from('buildings').delete().eq('id', id);
+    if (bErr) throw bErr;
+
+    console.log(`[Admin] Successfully deleted building ${id} and all related data.`);
+    res.json({ message: 'Building and all associated data deleted successfully' });
+  } catch (error) {
+    console.error('Delete building error:', error);
+    res.status(500).json({ error: 'Failed to delete building: ' + error.message });
+  }
+};

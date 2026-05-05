@@ -35,9 +35,15 @@ exports.addBill = async (req, res) => {
   }
 
   // Determine effective amount_mode
-  const effectiveAmountMode = category === 'water_meter' ? 'flat_wise' : (amount_mode || 'uniform');
+  const effectiveAmountMode = amount_mode || 'uniform';
   const VALID_AMOUNT_MODES = ['uniform', 'flat_wise'];
   if (!VALID_AMOUNT_MODES.includes(effectiveAmountMode)) return res.status(422).json({ error: 'amount_mode must be uniform or flat_wise' });
+
+  // Month and Year defaults (required by DB)
+  const currentMonth = new Date().getMonth() + 1;
+  const currentYear = new Date().getFullYear();
+  const billMonth = month ? parseInt(month, 10) : currentMonth;
+  const billYear = year ? parseInt(year, 10) : currentYear;
 
   // Validate due_date
   if (!due_date) return res.status(422).json({ error: 'due_date is required' });
@@ -50,17 +56,15 @@ exports.addBill = async (req, res) => {
     const parsedAmount = parseFloat(amount);
     if (isNaN(parsedAmount) || parsedAmount <= 0) return res.status(422).json({ error: 'amount must be a positive number' });
     if (parsedAmount > 9999999) return res.status(422).json({ error: 'amount is too large' });
-    const parsedMonth = parseInt(month);
-    if (isNaN(parsedMonth) || parsedMonth < 1 || parsedMonth > 12) return res.status(422).json({ error: 'month must be between 1 and 12' });
-    const parsedYear = parseInt(year);
-    if (isNaN(parsedYear) || parsedYear < 2000 || parsedYear > 2100) return res.status(422).json({ error: 'year must be a valid year' });
+    if (isNaN(billMonth) || billMonth < 1 || billMonth > 12) return res.status(422).json({ error: 'month must be between 1 and 12' });
+    if (isNaN(billYear) || billYear < 2000 || billYear > 2100) return res.status(422).json({ error: 'year must be a valid year' });
     const parsedPenalty = penalty_amount ? parseFloat(penalty_amount) : 0;
     if (isNaN(parsedPenalty) || parsedPenalty < 0) return res.status(422).json({ error: 'penalty_amount must be a non-negative number' });
 
     const { data: bill, error } = await supabase
       .from('maintenance_bills')
       .insert({
-        building_id, amount: parsedAmount, month: parsedMonth, year: parsedYear,
+        building_id, amount: parsedAmount, month: billMonth, year: billYear,
         due_date, description, penalty_amount: parsedPenalty,
         category: 'maintenance', amount_mode: 'uniform', targeting_mode: 'building_wide',
         created_by: req.user.id,
@@ -82,7 +86,7 @@ exports.addBill = async (req, res) => {
       );
       await ns.notifyMembers(building_id, {
         title: '🧾 Maintenance Bill',
-        body: `New bill of ₹${parsedAmount} for ${MONTHS[parsedMonth]} ${parsedYear}. Due: ${due_date}${parsedPenalty > 0 ? `. Penalty: ₹${parsedPenalty} after due date` : ''}`,
+        body: `New bill of ₹${parsedAmount} for ${MONTHS[billMonth]} ${billYear}. Due: ${due_date}${parsedPenalty > 0 ? `. Penalty: ₹${parsedPenalty} after due date` : ''}`,
         type: 'bill', meta: { bill_id: bill.id },
       });
       await settleAdvanceCredit(building_id, members, { id: bill.id, amount: parsedAmount });
@@ -99,7 +103,8 @@ exports.addBill = async (req, res) => {
       const { data: bill, error } = await supabase
         .from('maintenance_bills')
         .insert({
-          building_id, amount: parsedAmount, due_date, description: description || 'Water Meter Bill',
+          building_id, amount: parsedAmount, month: billMonth, year: billYear,
+          due_date, description: description || 'Water Meter Bill',
           category: 'water_meter', amount_mode: 'uniform', targeting_mode: 'building_wide',
           created_by: req.user.id,
         })
@@ -130,16 +135,19 @@ exports.addBill = async (req, res) => {
     if (!flat_amounts || !Array.isArray(flat_amounts) || flat_amounts.length === 0)
       return res.status(422).json({ error: 'flat_amounts is required for water_meter bills' });
 
+    let totalSum = 0;
     for (const entry of flat_amounts) {
       const amt = parseFloat(entry.amount);
       if (isNaN(amt) || amt <= 0)
         return res.status(422).json({ error: `amount for flat ${entry.flat_no || entry.user_id} must be a positive number` });
+      totalSum += amt;
     }
 
     const { data: bill, error } = await supabase
       .from('maintenance_bills')
       .insert({
-        building_id, amount: 0, due_date, description: description || 'Water Meter Bill',
+        building_id, amount: totalSum, month: billMonth, year: billYear,
+        due_date, description: description || 'Water Meter Bill',
         category: 'water_meter', amount_mode: 'flat_wise', targeting_mode: 'building_wide',
         created_by: req.user.id,
       })
@@ -155,8 +163,7 @@ exports.addBill = async (req, res) => {
     );
 
     for (const entry of flat_amounts) {
-      await supabase.from('notifications').insert({
-        user_id: entry.user_id,
+      await ns.notifyUser(entry.user_id, {
         title: '💧 Water Meter Bill',
         body: `Your water bill of ₹${entry.amount} is due by ${due_date}.`,
         type: 'bill', meta: { bill_id: bill.id },
@@ -190,7 +197,8 @@ exports.addBill = async (req, res) => {
       const { data: bill, error } = await supabase
         .from('maintenance_bills')
         .insert({
-          building_id, amount: parsedAmount, due_date, description,
+          building_id, amount: parsedAmount, month: billMonth, year: billYear,
+          due_date, description,
           category: 'special', amount_mode: 'uniform', targeting_mode,
           created_by: req.user.id,
         })
@@ -217,16 +225,20 @@ exports.addBill = async (req, res) => {
     // flat_wise special
     if (!flat_amounts || !Array.isArray(flat_amounts) || flat_amounts.length === 0)
       return res.status(422).json({ error: 'flat_amounts is required for flat_wise special bills' });
+    
+    let totalSum = 0;
     for (const entry of flat_amounts) {
       const amt = parseFloat(entry.amount);
       if (isNaN(amt) || amt <= 0)
         return res.status(422).json({ error: `amount for flat ${entry.flat_no || entry.user_id} must be a positive number` });
+      totalSum += amt;
     }
 
     const { data: bill, error } = await supabase
       .from('maintenance_bills')
       .insert({
-        building_id, amount: 0, due_date, description,
+        building_id, amount: totalSum, month: billMonth, year: billYear,
+        due_date, description,
         category: 'special', amount_mode: 'flat_wise', targeting_mode,
         created_by: req.user.id,
       })
@@ -241,8 +253,7 @@ exports.addBill = async (req, res) => {
       }))
     );
     for (const entry of flat_amounts) {
-      await supabase.from('notifications').insert({
-        user_id: entry.user_id,
+      await ns.notifyUser(entry.user_id, {
         title: '📋 Special Bill',
         body: `${description}: ₹${entry.amount} due by ${due_date}.`,
         type: 'bill', meta: { bill_id: bill.id },
@@ -267,9 +278,9 @@ exports.deleteBill = async (req, res) => {
   res.json({ message: 'Bill deleted' });
 };
 
-// Pramukh/Admin: update an existing bill (penalty, description, due_date, amount)
+// Pramukh/Admin: update an existing bill (penalty, description, due_date, amount, flat_amounts)
 exports.updateBill = async (req, res) => {
-  const { bill_id, penalty_amount, description, due_date, amount } = req.body;
+  const { bill_id, penalty_amount, description, due_date, amount, flat_amounts } = req.body;
   if (!bill_id) return res.status(422).json({ error: 'bill_id is required' });
 
   const { data: bill } = await supabase.from('maintenance_bills').select('*').eq('id', bill_id).single();
@@ -282,8 +293,28 @@ exports.updateBill = async (req, res) => {
   if (description !== undefined) updates.description = description?.trim();
   if (due_date !== undefined) updates.due_date = due_date || null;
 
-  if (amount !== undefined) {
-    const a = parseFloat(amount);
+  let finalAmount = amount;
+
+  // Handle flat_wise updates
+  if (flat_amounts && Array.isArray(flat_amounts)) {
+    let newTotal = 0;
+    for (const entry of flat_amounts) {
+      const amt = parseFloat(entry.amount);
+      if (isNaN(amt) || amt <= 0) continue;
+      
+      newTotal += amt;
+      // Update individual payment record
+      await supabase.from('maintenance_payments')
+        .update({ amount: amt, flat_amount: amt })
+        .eq('bill_id', bill_id)
+        .eq('user_id', entry.user_id)
+        .eq('status', 'pending');
+    }
+    finalAmount = newTotal;
+  }
+
+  if (finalAmount !== undefined) {
+    const a = parseFloat(finalAmount);
     if (isNaN(a) || a <= 0) return res.status(422).json({ error: 'amount must be a positive number' });
     updates.amount = a;
   }
@@ -311,8 +342,8 @@ exports.updateBill = async (req, res) => {
     .from('maintenance_bills').update(updates).eq('id', bill_id).select().single();
   if (error) return res.status(400).json({ error: error.message });
 
-  // Sync pending payment amounts if base amount changed
-  if (amount !== undefined) {
+  // Sync pending payment amounts if base amount changed (only for uniform bills)
+  if (amount !== undefined && bill.amount_mode === 'uniform') {
     await supabase.from('maintenance_payments')
       .update({ amount: updates.amount, flat_amount: updates.amount })
       .eq('bill_id', bill_id)
@@ -350,15 +381,16 @@ exports.getBills = async (req, res) => {
 exports.getPaymentRecords = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
   const mineOnly = req.query.mine === 'true';
-  const { category } = req.query;
+  const { category, bill_id } = req.query;
 
   let query = supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(month, year, amount, due_date, description, category, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone), buildings(payment_method, payment_tc)');
+    .select('*, maintenance_bills(month, year, amount, due_date, description, category, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone, wing), buildings(payment_method, payment_tc)');
 
   if (building_id) query = query.eq('building_id', building_id);
   if (req.user.role === 'user' || mineOnly) query = query.eq('user_id', req.user.id);
   if (category) query = query.eq('category', category);
+  if (bill_id) query = query.eq('bill_id', bill_id);
 
   const { data, error } = await query.order('created_at', { ascending: false });
   if (error) return res.status(400).json({ error: error.message });

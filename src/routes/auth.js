@@ -51,6 +51,13 @@ router.post('/push-token', authenticate, async (req, res) => {
 router.patch('/profile', authenticate, async (req, res) => {
   const { phone, flat_no, wing, total_members } = req.body;
   const supabase = require('../supabase');
+  // Fetch current user details to get existing flat_no/wing if not provided in body
+  const { data: currentUser } = await supabase
+    .from('users')
+    .select('flat_no, wing')
+    .eq('id', req.user.id)
+    .single();
+
   const updates = {};
 
   if (phone !== undefined) {
@@ -67,22 +74,37 @@ router.patch('/profile', authenticate, async (req, res) => {
     updates.phone = trimmed;
   }
 
-  if (flat_no !== undefined) {
-    const trimmedFlat = flat_no?.trim() || null;
+  if (flat_no !== undefined || wing !== undefined) {
+    const trimmedFlat = flat_no !== undefined ? (flat_no?.trim() || null) : currentUser?.flat_no;
+    const trimmedWing = wing !== undefined ? (wing?.trim() || null) : currentUser?.wing;
+
     if (trimmedFlat && req.user.building_id) {
-      // Check flat_no uniqueness within the same building (exclude current user)
-      const { data: existingFlat } = await supabase
+      // Check flat_no + wing uniqueness within the same building (exclude current user)
+      let query = supabase
         .from('users')
         .select('id')
         .eq('flat_no', trimmedFlat)
         .eq('building_id', req.user.building_id)
-        .neq('id', req.user.id)
-        .single();
-      if (existingFlat) return res.status(409).json({ error: 'This flat number is already assigned to another resident' });
+        .neq('id', req.user.id);
+      
+      if (trimmedWing) {
+        query = query.eq('wing', trimmedWing);
+      } else {
+        query = query.is('wing', null);
+      }
+
+      const { data: existingFlat } = await query.maybeSingle();
+      
+      if (existingFlat) {
+        const errorMsg = trimmedWing 
+          ? `Flat ${trimmedFlat} in Wing ${trimmedWing} is already assigned to another resident`
+          : `Flat ${trimmedFlat} is already assigned to another resident`;
+        return res.status(409).json({ error: errorMsg });
+      }
     }
-    updates.flat_no = trimmedFlat;
+    if (flat_no !== undefined) updates.flat_no = flat_no?.trim() || null;
+    if (wing !== undefined) updates.wing = wing?.trim() || null;
   }
-  if (wing !== undefined) updates.wing = wing?.trim() || null;
   if (total_members !== undefined) updates.total_members = total_members ? Number(total_members) : null;
 
   const { data, error } = await supabase

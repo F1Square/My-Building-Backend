@@ -134,7 +134,7 @@ exports.reportParking = async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
 
-  await ns.notifyPramukh(building_id, {
+  await ns.notifyMembers(building_id, {
     title: '🚗 Parking Misconduct Reported',
     body: `${name} reported: ${description}${vehicle_number ? ` (${vehicle_number})` : ''}`,
     type: 'parking_report',

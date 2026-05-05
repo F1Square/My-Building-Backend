@@ -63,7 +63,10 @@ async function verifyDbConnection() {
   }
 }
 
+const { startScheduler } = require('./utils/scheduler');
+
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 My Building API running on port ${PORT}`);
   await verifyDbConnection();
+  startScheduler();
 });

@@ -1,5 +1,6 @@
 const supabase = require('../supabase');
 const { uploadImage } = require('../utils/imageUploadHelper');
+const ns = require('../utils/notificationService');
 
 // Upload complaint attachment to Cloudinary
 exports.uploadComplaintAttachment = async (req, res) => {
@@ -62,6 +63,15 @@ exports.createComplaint = async (req, res) => {
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
+
+  // Notify members and pramukh
+  await ns.notifyMembers(building_id, {
+    title: '📢 New Complaint Raised',
+    body: `${req.user.name} (${data.users?.flat_no}): ${title}`,
+    type: 'complaint',
+    meta: { complaint_id: data.id }
+  });
+
   res.status(201).json({ message: 'Complaint submitted', complaint: data });
 };
 
