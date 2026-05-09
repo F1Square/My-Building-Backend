@@ -18,7 +18,8 @@ exports.sendMessage = async (req, res) => {
   const { data, error } = await supabase
     .from('chats')
     .insert({ user_id, building_id, message: trimmed, sender_name: name })
-    .select().single();
+    .select('id, user_id, building_id, message, sender_name, created_at')
+    .single();
 
   if (error) return res.status(400).json({ error: error.message });
   res.status(201).json(data);
@@ -33,7 +34,7 @@ exports.getNewMessages = async (req, res) => {
 
   let query = supabase
     .from('chats')
-    .select('*')
+    .select('id, user_id, building_id, message, sender_name, created_at')
     .eq('building_id', building_id)
     .order('created_at', { ascending: true })
     .limit(50);
@@ -68,7 +69,7 @@ exports.getMessages = async (req, res) => {
 
   const { data, error } = await supabase
     .from('chats')
-    .select('*')
+    .select('id, user_id, building_id, message, sender_name, created_at')
     .eq('building_id', building_id)
     .order('created_at', { ascending: false })
     .range(from, from + limit - 1);
