@@ -2,10 +2,40 @@ const supabase = require('../supabase');
 const multer = require('multer');
 
 const VALID_LANGUAGES = ['english', 'hindi', 'gujarati'];
+const SIGNED_URL_TTL_SECONDS = 60 * 60; // 1 hour — long enough to read, short enough to limit leaks
 
 // Multer — memory storage for Supabase upload
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 exports.upload = upload;
+
+// Best-effort: extract the storage object path from a Supabase public URL.
+// Supabase public URLs look like:
+//   https://<project>.supabase.co/storage/v1/object/public/newspapers/<path>
+// We need just the part inside the bucket: e.g. "newspapers/english/2026-05-09_173...pdf"
+const extractStoragePath = (fileUrl) => {
+  if (!fileUrl) return null;
+  const marker = '/object/public/newspapers/';
+  const idx = fileUrl.indexOf(marker);
+  if (idx === -1) return null;
+  return `newspapers/${fileUrl.substring(idx + marker.length)}`;
+};
+
+// Generate a short-lived signed URL for an uploaded edition. Falls back to the
+// stored URL if signing fails (e.g. legacy rows or storage misconfig).
+const signUploadedUrl = async (edition) => {
+  if (!edition || edition.source !== 'upload') return edition?.file_url || null;
+  const path = extractStoragePath(edition.file_url);
+  if (!path) return edition.file_url;
+  try {
+    const { data, error } = await supabase.storage
+      .from('newspapers')
+      .createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
+    if (error || !data?.signedUrl) return edition.file_url;
+    return data.signedUrl;
+  } catch (_) {
+    return edition.file_url;
+  }
+};
 
 // GET /newspapers?date=YYYY-MM-DD&language=english
 exports.getEdition = async (req, res) => {
@@ -35,7 +65,16 @@ exports.getEdition = async (req, res) => {
     .eq('language', language)
     .maybeSingle();
 
-  if (edition) return res.json({ url: edition.file_url, source: edition.source, date, language });
+  if (edition) {
+    const signedUrl = await signUploadedUrl(edition);
+    return res.json({
+      url: signedUrl,
+      source: edition.source,
+      kind: edition.source === 'upload' ? 'pdf' : 'external',
+      date,
+      language,
+    });
+  }
 
   // Fall back to URL pattern
   const { data: pattern } = await supabase
@@ -46,7 +85,7 @@ exports.getEdition = async (req, res) => {
 
   if (pattern?.url_pattern) {
     const url = pattern.url_pattern.replace('{date}', date);
-    return res.json({ url, source: 'pattern', date, language });
+    return res.json({ url, source: 'pattern', kind: 'external', date, language });
   }
 
   res.status(404).json({ error: 'not_available' });

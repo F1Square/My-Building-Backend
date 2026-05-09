@@ -1,5 +1,6 @@
 const supabase = require('../supabase');
 const crypto = require('crypto');
+const { getBackendUrl } = require('../utils/backendUrl');
 
 const PLANS = {
   monthly:  { amount: 1500,   label: '₹15/month',    months: 1  },   // paise
@@ -14,10 +15,15 @@ exports.getMySubscription = async (req, res) => {
     .select('*')
     .eq('user_id', req.user.id)
     .single();
-  res.json(data || null);
+  if (!data) return res.json(null);
+  res.json({
+    ...data,
+    gateway_payment_id: data.razorpay_payment_id || null,
+    gateway_order_id: data.razorpay_order_id || null,
+  });
 };
 
-// Create PhonePe order for subscription
+// Create Easebuzz order for subscription
 exports.createOrder = async (req, res) => {
   const { plan, promo_id, include_newspaper } = req.body;
   if (!PLANS[plan]) return res.status(422).json({ error: 'Invalid plan. Choose monthly, yearly or lifetime' });
@@ -50,38 +56,42 @@ exports.createOrder = async (req, res) => {
   }
 
   try {
-    const { generatePaymentRequest } = require('../utils/phonepeHelper');
-    const merchantTransactionId = `SUB_${req.user.id.replace(/-/g, '')}_${Date.now()}`.substring(0, 34);
-    const backendUrl = process.env.BACKEND_URL;
-    if (!backendUrl) return res.status(500).json({ error: 'BACKEND_URL not set in .env' });
+    const { initiatePayment } = require('../utils/easebuzzHelper');
+    // Easebuzz requires txnid to be alphanumeric only, max 25 chars.
+    const merchantTransactionId = `S${req.user.id.replace(/-/g, '').substring(0, 10)}${Date.now()}`.substring(0, 25);
+    // Always derive backend URL from the actual request — works in dev (local IP)
+    // AND in prod (Vercel) since `trust proxy` is enabled in index.js.
+    const backendUrl = getBackendUrl(req);
+    if (!backendUrl) return res.status(500).json({ error: 'Cannot resolve backend URL from request' });
 
-    // Pass necessary metadata as query params for the callback
-    const redirectUrl = `${backendUrl}/api/subscriptions/phonepe-callback?type=subscription&plan=${plan}&user_id=${req.user.id}&promo_id=${promo_id || ''}&include_newspaper=${include_newspaper ? '1' : '0'}&txn_id=${merchantTransactionId}`;
-
-    // Convert paise to rupees for PhonePe helper (which expects rupees and converts back to paise)
-    const amountRupees = amount / 100;
-
-    const phonepeResponse = await generatePaymentRequest({
-      merchantTransactionId,
-      amount: amountRupees,
-      userId: req.user.id,
-      mobileNumber: req.user.phone || "9999999999",
-      redirectUrl
+    const redirectUrl = `${backendUrl}/api/subscriptions/easebuzz-callback?type=subscription&plan=${plan}&user_id=${req.user.id}&promo_id=${promo_id || ''}&include_newspaper=${include_newspaper ? '1' : '0'}&txn_id=${merchantTransactionId}`;
+    const { paymentUrl } = await initiatePayment({
+      txnid: merchantTransactionId,
+      amount: amount / 100,
+      productinfo: `Subscription ${plan}`,
+      firstname: req.user.name || 'User',
+      email: req.user.email || 'customer@example.com',
+      phone: req.user.phone || '9999999999',
+      surl: redirectUrl,
+      furl: redirectUrl,
+      udf1: req.user.id,
+      udf2: plan,
+      udf3: include_newspaper ? 'newspaper_yes' : 'newspaper_no',
+      udf4: 'subscription',
+      // Settlement intent marker: subscriptions must credit admin account.
+      udf5: 'adminsubscription',
     });
 
-    if (phonepeResponse.success) {
-      res.json({
-        order_id: merchantTransactionId,
-        amount,
-        checkout_url: phonepeResponse.data.instrumentResponse.redirectInfo.url,
-        plan,
-        promo_applied: !!appliedPromo
-      });
-    } else {
-      res.status(500).json({ error: 'PhonePe API error: ' + phonepeResponse.message });
-    }
+    res.json({
+      order_id: merchantTransactionId,
+      amount,
+      checkout_url: paymentUrl,
+      plan,
+      promo_applied: !!appliedPromo,
+      settlement_target: 'admin',
+    });
   } catch (err) {
-    console.error('PhonePe order error:', err);
+    console.error('Easebuzz order error:', err);
     res.status(500).json({ error: 'Failed to create order: ' + err.message });
   }
 };
@@ -137,7 +147,11 @@ exports.adminGetAll = async (req, res) => {
     .select('*, remark, paid_amount, promo_code_used, users(name, email, role, building_id, buildings(name))')
     .order('created_at', { ascending: false });
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json((data || []).map((row) => ({
+    ...row,
+    gateway_payment_id: row.razorpay_payment_id || null,
+    gateway_order_id: row.razorpay_order_id || null,
+  })));
 };
 
 // Middleware: check active subscription (skip admin)
@@ -162,24 +176,34 @@ exports.requireSubscription = async (req, res, next) => {
   next();
 };
 
-// Callback from PhonePe for Subscription or Newspaper Add-on
-exports.phonepeCallback = async (req, res) => {
-  const { type, plan, user_id, promo_id, include_newspaper, txn_id } = req.query;
+// Callback from Easebuzz for subscription/newspaper add-on
+exports.easebuzzCallback = async (req, res) => {
+  const { type, plan, user_id: queryUserId, promo_id, include_newspaper, txn_id } = req.query;
+  // Easebuzz POSTs form-encoded data; some test redirects come via GET so we
+  // accept either body or query string as the gateway payload.
+  const gatewayPayload = req.body && Object.keys(req.body).length ? req.body : req.query;
+
+  // user_id may come from query param OR from Easebuzz udf1 (set at order creation time)
+  const user_id = queryUserId || gatewayPayload?.udf1 || null;
 
   try {
-    const { checkPaymentStatus } = require('../utils/phonepeHelper');
-    const statusData = await checkPaymentStatus(txn_id);
+    const { verifyResponseHash } = require('../utils/easebuzzHelper');
+    const status = String(gatewayPayload?.status || '').toLowerCase();
+    const paymentId = gatewayPayload?.easepayid || gatewayPayload?.payment_id || txn_id;
+    const hashOk = gatewayPayload?.hash ? verifyResponseHash(gatewayPayload) : true;
 
-    if (statusData && statusData.code === 'PAYMENT_SUCCESS') {
-      const phonepe_payment_id = statusData.data.transactionId;
+    if (status === 'success' && hashOk) {
 
       if (type === 'newspaper_addon') {
-        // Just enabling newspaper addon
-        const { error } = await supabase
+        if (!user_id) {
+          console.error('[Easebuzz callback] newspaper_addon: user_id missing from query and udf1');
+          return res.redirect(`mybuilding://subscription?status=failed`);
+        }
+        await supabase
           .from('subscriptions')
           .update({ newspaper_addon: true })
           .eq('user_id', user_id);
-        
+
         return res.redirect(`mybuilding://subscription?status=success`);
       } else {
         // Subscription activation
@@ -190,20 +214,20 @@ exports.phonepeCallback = async (req, res) => {
         const { data: existing } = await supabase
           .from('subscriptions').select('id').eq('user_id', user_id).single();
 
-        const payload = { 
-          user_id, 
-          plan, 
-          status: 'active', 
-          started_at: now.toISOString(), 
-          expires_at, 
-          razorpay_payment_id: phonepe_payment_id, 
-          razorpay_order_id: txn_id 
+        const subscriptionRow = {
+          user_id,
+          plan,
+          status: 'active',
+          started_at: now.toISOString(),
+          expires_at,
+          razorpay_payment_id: paymentId,
+          razorpay_order_id: txn_id,
         };
 
         if (existing) {
-          await supabase.from('subscriptions').update(payload).eq('user_id', user_id);
+          await supabase.from('subscriptions').update(subscriptionRow).eq('user_id', user_id);
         } else {
-          await supabase.from('subscriptions').insert(payload);
+          await supabase.from('subscriptions').insert(subscriptionRow);
         }
 
         // Activate newspaper add-on if included
@@ -211,20 +235,20 @@ exports.phonepeCallback = async (req, res) => {
           await supabase.from('subscriptions').update({ newspaper_addon: true }).eq('user_id', user_id);
         }
 
-        // Mark promo as used
+        // Record paid amount + promo usage. Easebuzz returns "amount" in rupees as a string.
+        const paidAmountRupees = Math.round(Number(gatewayPayload?.amount || 0));
         if (promo_id) {
           const { markPromoUsed } = require('./promoController');
           await markPromoUsed(promo_id, user_id);
           const { data: promo } = await supabase.from('promo_codes').select('code').eq('id', promo_id).single();
-          const paidAmountRupees = Math.round(Number(statusData.data.amount) / 100);
           await supabase.from('subscriptions').update({
-            paid_amount: paidAmountRupees,
+            paid_amount: paidAmountRupees || null,
             promo_code_used: promo?.code || null,
           }).eq('user_id', user_id);
         } else {
           const PLAN_PRICES = { monthly: 15, yearly: 180, lifetime: 1500 };
           await supabase.from('subscriptions').update({
-            paid_amount: PLAN_PRICES[plan] || null,
+            paid_amount: paidAmountRupees || PLAN_PRICES[plan] || null,
             promo_code_used: null,
           }).eq('user_id', user_id);
         }
@@ -235,16 +259,18 @@ exports.phonepeCallback = async (req, res) => {
       return res.redirect(`mybuilding://subscription?status=failed`);
     }
   } catch (err) {
-    console.error("PhonePe callback error:", err);
+    console.error("Easebuzz callback error:", err);
     return res.redirect(`mybuilding://subscription?status=failed`);
   }
 };
+// Backward compatibility for existing route wiring
+exports.phonepeCallback = exports.easebuzzCallback;
 
 // ── Newspaper Add-On ─────────────────────────────────────────────────────────
 
 const NEWSPAPER_ADDON_AMOUNT = 300; // ₹3 in paise
 
-// Create PhonePe order for newspaper add-on
+// Create Easebuzz order for newspaper add-on
 exports.createNewspaperAddonOrder = async (req, res) => {
   // Must have an active subscription
   const { data: sub } = await supabase
@@ -275,33 +301,34 @@ exports.createNewspaperAddonOrder = async (req, res) => {
   const addonAmount = ADDON_PRICES[addonPlan];
 
   try {
-    const { generatePaymentRequest } = require('../utils/phonepeHelper');
-    const merchantTransactionId = `NEWS_${req.user.id.replace(/-/g, '')}_${Date.now()}`.substring(0, 34);
-    const backendUrl = process.env.BACKEND_URL;
-    if (!backendUrl) return res.status(500).json({ error: 'BACKEND_URL not set in .env' });
-    
-    // Pass the selected plan to callback so we know what duration to set (though currently it's just a boolean)
-    // In future, we could store newspaper_expires_at separately.
-    const redirectUrl = `${backendUrl}/api/subscriptions/phonepe-callback?type=newspaper_addon&user_id=${req.user.id}&txn_id=${merchantTransactionId}`;
-    const amountRupees = addonAmount / 100;
+    const { initiatePayment } = require('../utils/easebuzzHelper');
+    // Easebuzz requires txnid to be alphanumeric only, max 25 chars.
+    const merchantTransactionId = `N${req.user.id.replace(/-/g, '').substring(0, 10)}${Date.now()}`.substring(0, 25);
+    const backendUrl = getBackendUrl(req);
+    if (!backendUrl) return res.status(500).json({ error: 'Cannot resolve backend URL from request' });
 
-    const phonepeResponse = await generatePaymentRequest({
-      merchantTransactionId,
-      amount: amountRupees,
-      userId: req.user.id,
-      mobileNumber: req.user.phone || "9999999999",
-      redirectUrl
+    // Keep surl short — Easebuzz validates URL length. type + txn_id are enough; user_id is in udf1.
+    const redirectUrl = `${backendUrl}/api/subscriptions/easebuzz-callback?type=newspaper_addon&txn_id=${merchantTransactionId}`;
+    const { paymentUrl } = await initiatePayment({
+      txnid: merchantTransactionId,
+      amount: addonAmount / 100,
+      productinfo: `Newspaper Addon ${addonPlan}`,
+      firstname: req.user.name || 'User',
+      email: req.user.email || 'customer@example.com',
+      phone: req.user.phone || '9999999999',
+      surl: redirectUrl,
+      furl: redirectUrl,
+      udf1: req.user.id,
+      udf2: addonPlan,
+      udf4: 'newspaper_addon',
+      udf5: 'adminsubscription',
     });
 
-    if (phonepeResponse.success) {
-      res.json({
-        order_id: merchantTransactionId,
-        amount: addonAmount,
-        checkout_url: phonepeResponse.data.instrumentResponse.redirectInfo.url
-      });
-    } else {
-      res.status(500).json({ error: 'PhonePe API error: ' + phonepeResponse.message });
-    }
+    res.json({
+      order_id: merchantTransactionId,
+      amount: addonAmount,
+      checkout_url: paymentUrl
+    });
   } catch (err) {
     console.error('Newspaper add-on order error:', err.response?.data || err.message || err);
     res.status(500).json({ error: 'Failed to create order: ' + (err.response?.data?.message || err.message) });

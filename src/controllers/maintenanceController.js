@@ -4,6 +4,8 @@ const ns = require('../utils/notificationService');
 const addMaintenanceExpense = require('../utils/addMaintenanceExpense');
 const settleAdvanceCredit = require('../utils/settleAdvanceCredit');
 const { uploadImage } = require('../utils/imageUploadHelper');
+const { getBackendUrl } = require('../utils/backendUrl');
+const { logActivity } = require('../utils/activityLogger');
 
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -408,6 +410,8 @@ exports.getPaymentRecords = async (req, res) => {
 
     return {
       ...p,
+      gateway_payment_id: p.razorpay_payment_id || null,
+      gateway_order_id: p.razorpay_order_id || null,
       display_amount: displayAmount,
       is_overdue: !!(isMaintenance && isOverdue && penaltyAmount > 0),
       building_payment_method: p.buildings?.payment_method ?? null,
@@ -463,10 +467,10 @@ exports.uploadReceiptImage = async (req, res) => {
       });
     }
 
-    // Upload image to Cloudinary
+    // Upload image — stream Buffer (RN uploads); omit fixed public_id to avoid collisions
     const result = await uploadImage(req.file.buffer, {
       folder: 'receipts',
-      publicId: `receipt_${payment_record_id}`
+      overwrite: false,
     });
 
     // Update payment record with receipt URL and payment method
@@ -510,8 +514,11 @@ exports.uploadReceiptImage = async (req, res) => {
 };
 
 // User/Pramukh: upload transaction receipt for a pending payment
+// (legacy data-URI path; the multer-based `uploadReceiptImage` is preferred)
 exports.uploadReceipt = async (req, res) => {
+  const { id } = req.params;
   const { receipt_url, payment_method } = req.body;
+  if (!id) return res.status(422).json({ error: 'payment id is required' });
   if (!receipt_url) return res.status(422).json({ error: 'receipt_url is required' });
 
   const { data: record } = await supabase
@@ -534,12 +541,14 @@ exports.uploadReceipt = async (req, res) => {
     }
   }
 
+  const method = payment_method?.toLowerCase() || 'online';
   const { error } = await supabase
     .from('maintenance_payments')
-    .update({ 
-      receipt_url: finalReceiptUrl, 
+    .update({
+      receipt_url: finalReceiptUrl,
+      cheque_photo_url: method === 'cheque' ? finalReceiptUrl : null,
       status: 'receipt_uploaded',
-      payment_method: payment_method?.toLowerCase() || 'online'
+      payment_method: method,
     })
     .eq('id', id);
 
@@ -550,7 +559,7 @@ exports.uploadReceipt = async (req, res) => {
 // Pramukh/Admin: Approve manual payment (cash/cheque)
 exports.approvePayment = async (req, res) => {
   const { id } = req.params;
-  
+
   const { data: record, error: fetchErr } = await supabase
     .from('maintenance_payments')
     .select('*, maintenance_bills(month, year, amount), users!maintenance_payments_user_id_fkey(name, role)')
@@ -559,29 +568,105 @@ exports.approvePayment = async (req, res) => {
 
   if (fetchErr || !record) return res.status(404).json({ error: 'Payment record not found' });
   if (record.status === 'paid') return res.status(400).json({ error: 'Payment already completed' });
-  
+
   // Scope check
   if (req.user.role === 'pramukh' && record.building_id !== req.user.building_id)
     return res.status(403).json({ error: 'Access denied' });
 
+  // Preserve the existing payment_method when approving (cheque/cash) so the
+  // receipt PDF + expense entry render the right method label. If no method
+  // was previously set (e.g. older records), default to 'cash'.
+  const method = record.payment_method || 'cash';
   const { error } = await supabase
     .from('maintenance_payments')
-    .update({ 
+    .update({
       status: 'paid',
+      payment_method: method,
       paid_at: new Date().toISOString(),
-      razorpay_payment_id: `MANUAL_${Date.now()}` // Identifier for manual payments
+      razorpay_payment_id: `MANUAL_${method.toUpperCase()}_${Date.now()}`,
     })
     .eq('id', id);
 
   if (error) return res.status(400).json({ error: error.message });
 
-  const { addMaintenanceExpense } = require('./expensesController');
-  try { await addMaintenanceExpense(id); } catch(e) {}
+  // Push to expense ledger (uses the correct top-level util — the previously
+  // destructured import from './expensesController' was undefined and silently
+  // dropped cash/cheque inflows from the society fund).
+  try { await addMaintenanceExpense(id); } catch (e) {
+    console.error('[approvePayment] expense ledger failed:', e?.message);
+  }
+
+  // Notify the resident their manual payment was approved
+  try {
+    await ns.notifyUser(record.user_id, {
+      title: '✅ Payment Approved',
+      body: `Your ${method} payment of ₹${Number(record.total_amount || record.amount).toLocaleString('en-IN')} has been approved. You can now download the receipt.`,
+      type: 'payment_approved',
+      meta: { payment_record_id: id },
+    });
+  } catch {}
 
   res.json({ message: 'Payment approved', status: 'paid' });
 };
 
-// User/Pramukh: create PhonePe order + return checkout URL
+// User/Pramukh: signal "I want to pay in cash" — moves the record to a
+// cash_requested state so pramukh/admin sees a clear queue of intents to
+// confirm. Once they collect the money in person they call approvePayment
+// to flip the record to 'paid' and push to the expense ledger.
+exports.requestCashPayment = async (req, res) => {
+  const { id } = req.params;
+  if (!id) return res.status(422).json({ error: 'payment id is required' });
+
+  const { data: record, error: fetchErr } = await supabase
+    .from('maintenance_payments')
+    .select('id, user_id, building_id, status, amount, total_amount, maintenance_bills(month, year, description, category)')
+    .eq('id', id)
+    .single();
+
+  if (fetchErr || !record) return res.status(404).json({ error: 'Payment record not found' });
+  if (record.user_id !== req.user.id) return res.status(403).json({ error: 'Access denied' });
+  if (record.status === 'paid') return res.status(400).json({ error: 'Payment already completed' });
+
+  // status `cash_requested` is the canonical signal; keep `pending` semantics
+  // for any older clients that filter on string === 'pending' by also
+  // tagging payment_method so they can union-filter when needed.
+  const { error } = await supabase
+    .from('maintenance_payments')
+    .update({
+      status: 'cash_requested',
+      payment_method: 'cash',
+    })
+    .eq('id', id);
+
+  if (error) return res.status(400).json({ error: error.message });
+
+  // Notify pramukh + admin of this building so they can collect & approve.
+  try {
+    const { data: approvers } = await supabase
+      .from('users')
+      .select('id')
+      .eq('building_id', record.building_id)
+      .in('role', ['pramukh', 'admin'])
+      .eq('status', 'approved');
+
+    const bill = record.maintenance_bills;
+    const period = bill?.month ? `${MONTHS[bill.month]} ${bill.year}` : (bill?.description || '');
+    const amount = Number(record.total_amount || record.amount).toLocaleString('en-IN');
+
+    if (approvers?.length) {
+      await Promise.all(approvers.map((a) => ns.notifyUser(a.id, {
+        title: '💵 Cash payment requested',
+        body: `Resident wants to pay ₹${amount} ${period ? `for ${period}` : ''} in cash. Approve once collected.`,
+        type: 'cash_requested',
+        meta: { payment_record_id: id },
+      })));
+    }
+  } catch {}
+
+  res.json({ message: 'Cash payment requested. Please pay in person to your pramukh/admin.', status: 'cash_requested' });
+};
+
+// User/Pramukh: create Easebuzz order + return checkout URL
 exports.createPaymentOrder = async (req, res) => {
   const { payment_record_id } = req.body;
   if (!payment_record_id) return res.status(422).json({ error: 'payment_record_id is required' });
@@ -589,7 +674,7 @@ exports.createPaymentOrder = async (req, res) => {
   // Fetch payment record with bill, user, and building info
   const { data: record, error: recErr } = await supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(amount, month, year, due_date, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, phone, id), buildings(name, address)')
+    .select('*, maintenance_bills(amount, month, year, due_date, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, phone, email, id), buildings(name, address)')
     .eq('id', payment_record_id).eq('user_id', req.user.id).single();
 
   if (recErr || !record) return res.status(404).json({ error: 'Payment record not found' });
@@ -608,115 +693,141 @@ exports.createPaymentOrder = async (req, res) => {
     .eq('id', payment_record_id);
 
   try {
-    const { generatePaymentRequest } = require('../utils/phonepeHelper');
-    const merchantTransactionId = `MNT_${payment_record_id.replace(/-/g, '')}_${Date.now()}`.substring(0, 34); // PhonePe limit is 34 chars
-    const backendUrl = process.env.BACKEND_URL;
-    if (!backendUrl) return res.status(500).json({ error: 'BACKEND_URL not set in .env' });
+    const { initiatePayment } = require('../utils/easebuzzHelper');
+    // Easebuzz: txnid alphanumeric only, max 25 chars (see easebuzzHelper.sanitizeTxnid).
+    const rid = payment_record_id.replace(/-/g, '');
+    const merchantTransactionId = `M${rid.slice(0, 10)}${Date.now()}`.slice(0, 25);
+    const backendUrl = getBackendUrl(req);
+    if (!backendUrl) return res.status(500).json({ error: 'Cannot resolve backend URL from request' });
 
-    // This URL will handle the redirect from PhonePe after payment
-    const redirectUrl = `${backendUrl}/api/maintenance/pay/phonepe-callback?record_id=${payment_record_id}&txn_id=${merchantTransactionId}`;
+    const bill = record.maintenance_bills;
+    const productinfo = bill?.description?.trim()
+      ? `Maintenance bill ${bill.description}`
+      : bill?.month != null && bill?.year != null
+        ? `Maintenance period ${bill.month}-${bill.year}`
+        : 'Maintenance payment';
 
-    const phonepeResponse = await generatePaymentRequest({
-      merchantTransactionId,
+    const redirectUrl = `${backendUrl}/api/maintenance/pay/easebuzz-callback?record_id=${payment_record_id}&txn_id=${merchantTransactionId}`;
+    const { paymentUrl } = await initiatePayment({
+      txnid: merchantTransactionId,
       amount: totalAmount,
-      userId: record.users.id,
-      mobileNumber: record.users.phone || "9999999999",
-      redirectUrl
+      productinfo,
+      firstname: record.users?.name || 'Resident',
+      email: record.users?.email || req.user?.email || 'customer@example.com',
+      phone: record.users?.phone || '9999999999',
+      surl: redirectUrl,
+      furl: redirectUrl,
+      udf1: payment_record_id,
+      udf2: record.users?.id || req.user.id,
+      udf3: record.building_id,
+      udf4: 'maintenance',
+      // building_id is already in udf3; use simple label (Easebuzz rejects ':' and long markers in udf5).
+      udf5: 'maintenance',
     });
 
-    if (phonepeResponse.success) {
-      // Save the transaction ID to the database (repurposing razorpay_order_id for now)
-      await supabase.from('maintenance_payments')
-        .update({ razorpay_order_id: merchantTransactionId })
-        .eq('id', payment_record_id);
+    await supabase.from('maintenance_payments')
+      .update({ razorpay_order_id: merchantTransactionId })
+      .eq('id', payment_record_id);
 
-      // Extract the URL to redirect the user to
-      const checkoutUrl = phonepeResponse.data.instrumentResponse.redirectInfo.url;
-
-      res.json({
-        order_id: merchantTransactionId,
-        amount: totalAmount,
-        checkout_url: checkoutUrl,
-        payment_record_id,
-        society_name: record.buildings?.name,
-        is_overdue: isOverdue && penaltyAmount > 0,
-      });
-    } else {
-      res.status(500).json({ error: 'PhonePe API error: ' + phonepeResponse.message });
-    }
+    res.json({
+      order_id: merchantTransactionId,
+      amount: totalAmount,
+      checkout_url: paymentUrl,
+      payment_record_id,
+      society_name: record.buildings?.name,
+      is_overdue: isOverdue && penaltyAmount > 0,
+      settlement_target: 'society',
+    });
   } catch (err) {
-    console.error('PhonePe order error:', err);
+    console.error('Easebuzz order error:', err);
     res.status(500).json({ error: 'Failed to create payment order: ' + err.message });
   }
 };
 
-// PhonePe Redirect Callback — PhonePe redirects the user here (POST request)
-exports.phonepeCallback = async (req, res) => {
+// Easebuzz Redirect Callback — gateway redirects the user here
+exports.easebuzzCallback = async (req, res) => {
   const { record_id, txn_id } = req.query;
+  const payload = req.body && Object.keys(req.body).length ? req.body : req.query;
 
   try {
-    const { checkPaymentStatus } = require('../utils/phonepeHelper');
-    const statusData = await checkPaymentStatus(txn_id);
+    const { verifyResponseHash } = require('../utils/easebuzzHelper');
+    const status = String(payload?.status || '').toLowerCase();
+    const paymentId = payload?.easepayid || payload?.payment_id || txn_id;
+    const hashOk = payload?.hash ? verifyResponseHash(payload) : true;
 
-    if (statusData && statusData.code === 'PAYMENT_SUCCESS') {
-      const phonepe_payment_id = statusData.data.transactionId; // PhonePe's transaction ID
+    if (status === 'success' && hashOk) {
 
       const { error } = await supabase.from('maintenance_payments').update({
         status: 'paid',
-        razorpay_payment_id: phonepe_payment_id, // Storing here instead of Razorpay ID
+        payment_method: 'online_easebuzz',
+        razorpay_payment_id: paymentId,
+        razorpay_order_id: txn_id,
         paid_at: new Date().toISOString()
       }).eq('id', record_id);
 
       if (!error) {
-        // Fetch payment record for logging
-        const { data: rec } = await supabase
-          .from('maintenance_payments')
-          .select('user_id, building_id, amount, total_amount, maintenance_bills(month, year, amount), users(name, role)')
-          .eq('id', record_id).single();
+        // Ledger + activity log must not delay HTTP redirect — Safari/SFSafariViewController
+        // needs an immediate response after Easebuzz posts back, same pattern as subscription.
+        void (async () => {
+          try {
+            const { data: rec } = await supabase
+              .from('maintenance_payments')
+              .select('user_id, building_id, amount, total_amount, maintenance_bills(month, year, amount), users(name, role)')
+              .eq('id', record_id).single();
 
-        if (rec) {
-          await logActivity(
-            { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
-            'payment_completed',
-            'maintenance',
-            {
-              record_id,
-              phonepe_payment_id,
-              amount_paid: rec.total_amount || rec.amount,
-              bill_period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}`,
-              method: 'online',
+            const tasks = [addMaintenanceExpense(record_id)];
+            if (rec) {
+              tasks.push(logActivity(
+                { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
+                'payment_completed',
+                'maintenance',
+                {
+                  record_id,
+                  gateway_payment_id: paymentId,
+                  amount_paid: rec.total_amount || rec.amount,
+                  bill_period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}`,
+                  method: 'online_easebuzz',
+                }
+              ));
             }
-          );
-        }
+            await Promise.allSettled(tasks);
+          } catch (e) {
+            console.error('[easebuzzCallback] post-redirect maintenance tasks:', e?.message);
+          }
+        })();
       }
 
-      // Auto-add inflow to expenses module
-      await addMaintenanceExpense(record_id);
-
-      // Redirect back to app successfully
-      return res.redirect(`mybuilding://payment?status=success&record_id=${record_id}`);
+      return res.redirect(
+        `mybuilding://payment?status=success&record_id=${encodeURIComponent(record_id)}`,
+      );
     } else {
-      // Payment Failed or Pending
+      // Payment failed or hash mismatch
       const { data: rec } = await supabase
         .from('maintenance_payments')
         .select('user_id, building_id, amount, maintenance_bills(month, year), users(name, role)')
         .eq('id', record_id).single();
 
       if (rec) {
-        await logActivity(
+        // Fire-and-forget; logActivity already swallows its own errors.
+        logActivity(
           { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
           'payment_failed',
           'maintenance',
-          { record_id, reason: statusData?.message || 'verification_failed', amount: rec.amount, period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}` }
+          { record_id, reason: status || 'verification_failed', amount: rec.amount, period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}` }
         );
       }
-      return res.redirect(`mybuilding://payment?status=failed&record_id=${record_id}`);
+      return res.redirect(
+        `mybuilding://payment?status=failed&record_id=${encodeURIComponent(record_id)}`,
+      );
     }
   } catch (err) {
-    console.error("PhonePe callback processing error:", err);
-    return res.redirect(`mybuilding://payment?status=failed&record_id=${record_id}`);
+    console.error("Easebuzz callback processing error:", err);
+    const rid = encodeURIComponent(record_id || '');
+    return res.redirect(`mybuilding://payment?status=failed&record_id=${rid}`);
   }
 };
+// Backward compatibility for existing route wiring
+exports.phonepeCallback = exports.easebuzzCallback;
 
 // Generate PDF receipt
 exports.downloadReceipt = async (req, res) => {
@@ -724,7 +835,7 @@ exports.downloadReceipt = async (req, res) => {
 
   const { data: record } = await supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(month, year, amount, due_date, description), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone), buildings(name, address)')
+    .select('*, maintenance_bills(month, year, amount, due_date, description, category, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone), buildings(name, address)')
     .eq('id', payment_record_id).single();
 
   if (!record) return res.status(404).json({ error: 'Record not found' });
@@ -737,6 +848,30 @@ exports.downloadReceipt = async (req, res) => {
   const user = record.users;
   const building = record.buildings;
 
+  // Resolve amounts. Use the per-record numbers (penalty_amount, total_amount)
+  // captured at payment time so the PDF reflects what the resident actually
+  // paid, not the current bill row (which may be edited later).
+  const baseAmount = Number(record.amount ?? bill?.amount ?? 0);
+  const penaltyAmount = Number(record.penalty_amount ?? 0);
+  const totalAmount = Number(record.total_amount ?? (baseAmount + penaltyAmount));
+
+  // Friendly payment-method label.
+  const rawMethod = String(record.payment_method || '').toLowerCase();
+  const methodLabel = rawMethod.startsWith('online') || rawMethod === 'easebuzz'
+    ? 'Online (Easebuzz)'
+    : rawMethod === 'cheque'
+      ? 'Cheque'
+      : rawMethod === 'cash'
+        ? 'Cash'
+        : 'Manual';
+
+  // Friendly category label for the title strip.
+  const categoryLabel = {
+    maintenance: 'Maintenance Payment Receipt',
+    water_meter: 'Water Meter Payment Receipt',
+    special: 'Special Bill Payment Receipt',
+  }[bill?.category || 'maintenance'] || 'Payment Receipt';
+
   const doc = new PDFDocument({ margin: 50, size: 'A4' });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename=receipt_${payment_record_id.slice(0, 8)}.pdf`);
@@ -745,18 +880,18 @@ exports.downloadReceipt = async (req, res) => {
   // Header band
   doc.rect(0, 0, doc.page.width, 80).fill('#1E3A8A');
   doc.fillColor('#fff').fontSize(26).font('Helvetica-Bold').text('My Building', 50, 22);
-  doc.fontSize(11).font('Helvetica').text('Maintenance Payment Receipt', 50, 52);
+  doc.fontSize(11).font('Helvetica').text(categoryLabel, 50, 52);
 
   // Receipt meta box
   doc.fillColor('#111827').rect(50, 100, doc.page.width - 100, 55).stroke('#E5E7EB');
   doc.fontSize(10).font('Helvetica');
   doc.text(`Receipt No: ${payment_record_id.slice(0, 8).toUpperCase()}`, 62, 112);
-  doc.text(`Payment Date: ${new Date(record.paid_at).toLocaleDateString('en-IN')}`, 62, 126);
-  doc.text(`Method: Online (Razorpay)`, 300, 112);
+  doc.text(`Payment Date: ${record.paid_at ? new Date(record.paid_at).toLocaleDateString('en-IN') : '—'}`, 62, 126);
+  doc.text(`Method: ${methodLabel}`, 300, 112);
   if (record.razorpay_payment_id) {
-    doc.text(`Razorpay ID: ${record.razorpay_payment_id}`, 300, 126);
+    doc.text(`Reference: ${record.razorpay_payment_id}`, 300, 126);
   }
-  doc.fillColor('#16A34A').font('Helvetica-Bold').text('STATUS: PAID ✓', 62, 140);
+  doc.fillColor('#16A34A').font('Helvetica-Bold').text('STATUS: PAID', 62, 140);
 
   // Two-column info
   doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Building', 50, 175);
@@ -766,7 +901,7 @@ exports.downloadReceipt = async (req, res) => {
 
   doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Resident', 300, 175);
   doc.font('Helvetica').fontSize(10).fillColor('#374151');
-  doc.text(`Name: ${user?.name}`, 300, 191);
+  doc.text(`Name: ${user?.name || '—'}`, 300, 191);
   doc.text(`Flat: ${user?.flat_no || 'N/A'}  |  Phone: ${user?.phone || 'N/A'}`, 300, 205);
 
   // Table header
@@ -777,24 +912,40 @@ exports.downloadReceipt = async (req, res) => {
   doc.text('Due Date', 360, 243);
   doc.text('Amount', 470, 243);
 
-  // Table row
-  doc.rect(50, 261, doc.page.width - 100, 32).stroke('#E5E7EB');
+  // Base bill line item
+  let rowY = 261;
+  doc.rect(50, rowY, doc.page.width - 100, 28).stroke('#E5E7EB');
   doc.font('Helvetica').fontSize(10).fillColor('#374151');
-  doc.text(bill?.description || 'Monthly Maintenance', 62, 271);
-  doc.text(`${MONTHS[bill?.month]} ${bill?.year}`, 240, 271);
-  doc.text(bill?.due_date || '—', 360, 271);
-  doc.text(`Rs. ${Number(bill?.amount).toLocaleString('en-IN')}`, 470, 271);
+  doc.text(bill?.description || 'Bill', 62, rowY + 9);
+  doc.text(bill?.month ? `${MONTHS[bill.month]} ${bill.year}` : '—', 240, rowY + 9);
+  doc.text(bill?.due_date || '—', 360, rowY + 9);
+  doc.text(`Rs. ${baseAmount.toLocaleString('en-IN')}`, 470, rowY + 9);
+  rowY += 28;
 
-  // Total row
-  doc.rect(50, 308, doc.page.width - 100, 36).fill('#1E3A8A');
+  // Penalty line item (only when actually charged on this payment)
+  if (penaltyAmount > 0) {
+    doc.rect(50, rowY, doc.page.width - 100, 28).stroke('#E5E7EB');
+    doc.fillColor('#B45309').font('Helvetica-Oblique');
+    doc.text('Late-payment penalty', 62, rowY + 9);
+    doc.fillColor('#374151').font('Helvetica');
+    doc.text('—', 240, rowY + 9);
+    doc.text('—', 360, rowY + 9);
+    doc.fillColor('#B45309').font('Helvetica-Bold');
+    doc.text(`Rs. ${penaltyAmount.toLocaleString('en-IN')}`, 470, rowY + 9);
+    rowY += 28;
+  }
+
+  // Total row (uses the actual paid total, including penalty when present)
+  rowY += 12;
+  doc.rect(50, rowY, doc.page.width - 100, 36).fill('#1E3A8A');
   doc.fillColor('#fff').font('Helvetica-Bold').fontSize(13);
-  doc.text('Total Paid', 62, 319);
-  doc.text(`Rs. ${Number(bill?.amount).toLocaleString('en-IN')}`, 470, 319);
+  doc.text('Total Paid', 62, rowY + 11);
+  doc.text(`Rs. ${totalAmount.toLocaleString('en-IN')}`, 470, rowY + 11);
 
   // Footer
   doc.fillColor('#9CA3AF').font('Helvetica').fontSize(9);
-  doc.text('This is a computer-generated receipt. No signature required.', 50, 380, { align: 'center', width: doc.page.width - 100 });
-  doc.text(`Generated on ${new Date().toLocaleString('en-IN')}`, 50, 393, { align: 'center', width: doc.page.width - 100 });
+  doc.text('This is a computer-generated receipt. No signature required.', 50, rowY + 70, { align: 'center', width: doc.page.width - 100 });
+  doc.text(`Generated on ${new Date().toLocaleString('en-IN')}`, 50, rowY + 83, { align: 'center', width: doc.page.width - 100 });
 
   doc.end();
 };

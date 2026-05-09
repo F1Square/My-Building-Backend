@@ -1,4 +1,9 @@
+// Always load base .env first, then overlay .env.development when in dev mode.
+// This means .env.development only needs the keys that differ from production.
 require('dotenv').config();
+if (process.env.NODE_ENV === 'development') {
+  require('dotenv').config({ path: '.env.development', override: true });
+}
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -30,6 +35,14 @@ function validateEnvironmentVariables() {
 validateEnvironmentVariables();
 
 const app = express();
+
+// Trust the first proxy hop. Required for Vercel / Render / any reverse-proxy
+// deployment so that req.protocol returns the correct https scheme (instead
+// of the internal http) and req.ip returns the real client IP from
+// X-Forwarded-For. Without this, payment-callback redirect URLs end up with
+// the wrong scheme and Easebuzz refuses or falls back to env.
+app.set('trust proxy', true);
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));

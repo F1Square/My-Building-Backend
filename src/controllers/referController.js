@@ -64,6 +64,35 @@ exports.getMyReferrals = async (req, res) => {
   res.json(data);
 };
 
+// POST /refer/admin/ensure-code
+// Generates a referral_code for the given user if one doesn't already exist.
+// Lets admin reveal a code in the user-detail modal even if the user has
+// never opened their own Refer & Earn screen.
+exports.adminEnsureCode = async (req, res) => {
+  const { user_id } = req.body;
+  if (!user_id) return res.status(422).json({ error: 'user_id is required' });
+
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('id, referral_code')
+    .eq('id', user_id)
+    .single();
+  if (error || !user) return res.status(404).json({ error: 'User not found' });
+  if (user.referral_code) return res.json({ referral_code: user.referral_code });
+
+  try {
+    const code = await getUniqueCode();
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({ referral_code: code })
+      .eq('id', user_id);
+    if (updateError) return res.status(400).json({ error: updateError.message });
+    return res.json({ referral_code: code });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
 // GET /refer/admin/all
 exports.adminGetAll = async (req, res) => {
   const { data, error } = await supabase

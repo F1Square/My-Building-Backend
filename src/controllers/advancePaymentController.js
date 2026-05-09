@@ -1,6 +1,6 @@
-const crypto = require('crypto');
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { getBackendUrl } = require('../utils/backendUrl');
 
 // GET /maintenance/advance/status
 // Returns credit_balance, months_covered, monthly_amount, ledger for current user
@@ -70,9 +70,9 @@ exports.createAdvanceOrder = async (req, res) => {
   const monthly_amount = Number(latestBill.amount);
   const total_amount = monthly_amount * Number(months);
 
-  // Fetch user + building info for Razorpay notes
+  // Fetch user + building info for gateway metadata
   const [{ data: userRow }, { data: buildingRow }] = await Promise.all([
-    supabase.from('users').select('name, flat_no, phone').eq('id', user_id).single(),
+    supabase.from('users').select('name, flat_no, phone, email').eq('id', user_id).single(),
     supabase.from('buildings').select('name').eq('id', building_id).single(),
   ]);
 
@@ -87,60 +87,68 @@ exports.createAdvanceOrder = async (req, res) => {
         monthly_amount,
         total_amount,
         status: 'pending',
-        // razorpay_order_id will be updated below with merchantTransactionId
+        // razorpay_order_id is reused to store gateway order reference
       })
       .select()
       .single();
 
     if (insertErr) return res.status(500).json({ error: insertErr.message });
 
-    const { generatePaymentRequest } = require('../utils/phonepeHelper');
-    const merchantTransactionId = `ADV_${orderRow.id.replace(/-/g, '')}_${Date.now()}`.substring(0, 34);
-    const backendUrl = process.env.BACKEND_URL;
-    if (!backendUrl) return res.status(500).json({ error: 'BACKEND_URL not set in .env' });
+    const { initiatePayment } = require('../utils/easebuzzHelper');
+    const oid = orderRow.id.replace(/-/g, '');
+    const merchantTransactionId = `A${oid.slice(0, 10)}${Date.now()}`.slice(0, 25);
+    const backendUrl = getBackendUrl(req);
+    if (!backendUrl) return res.status(500).json({ error: 'Cannot resolve backend URL from request' });
 
     // Update order with the generated transaction ID
     await supabase.from('advance_payment_orders')
       .update({ razorpay_order_id: merchantTransactionId })
       .eq('id', orderRow.id);
 
-    const redirectUrl = `${backendUrl}/api/maintenance/advance/phonepe-callback?order_row_id=${orderRow.id}&txn_id=${merchantTransactionId}`;
+    const rawLabel = buildingRow?.name ? `Advance ${months}m ${buildingRow.name}` : `Advance ${months} months`;
 
-    const phonepeResponse = await generatePaymentRequest({
-      merchantTransactionId,
-      amount: total_amount, // already in rupees
-      userId: user_id,
-      mobileNumber: userRow?.phone || "9999999999",
-      redirectUrl
+    const redirectUrl = `${backendUrl}/api/maintenance/advance/easebuzz-callback?order_row_id=${orderRow.id}&txn_id=${merchantTransactionId}`;
+    const { paymentUrl } = await initiatePayment({
+      txnid: merchantTransactionId,
+      amount: total_amount,
+      productinfo: rawLabel,
+      firstname: userRow?.name || 'Resident',
+      email: userRow?.email || req.user?.email || 'customer@example.com',
+      phone: userRow?.phone || '9999999999',
+      surl: redirectUrl,
+      furl: redirectUrl,
+      udf1: orderRow.id,
+      udf2: user_id,
+      udf3: building_id,
+      udf4: 'advance_maintenance',
+      udf5: 'advance',
     });
 
-    if (phonepeResponse.success) {
-      res.json({ 
-        order_id: merchantTransactionId, 
-        checkout_url: phonepeResponse.data.instrumentResponse.redirectInfo.url, 
-        total_amount, 
-        monthly_amount, 
-        months 
-      });
-    } else {
-      res.status(500).json({ error: 'PhonePe API error: ' + phonepeResponse.message });
-    }
+    res.json({
+      order_id: merchantTransactionId,
+      checkout_url: paymentUrl,
+      total_amount,
+      monthly_amount,
+      months
+    });
   } catch (err) {
-    console.error('PhonePe advance order error:', err);
+    console.error('Easebuzz advance order error:', err);
     res.status(500).json({ error: 'Failed to create payment order: ' + err.message });
   }
 };
 
-// PhonePe Callback
-exports.phonepeCallback = async (req, res) => {
+// Easebuzz Callback
+exports.easebuzzCallback = async (req, res) => {
   const { order_row_id, txn_id } = req.query;
+  const payload = req.body && Object.keys(req.body).length ? req.body : req.query;
 
   try {
-    const { checkPaymentStatus } = require('../utils/phonepeHelper');
-    const statusData = await checkPaymentStatus(txn_id);
+    const { verifyResponseHash } = require('../utils/easebuzzHelper');
+    const status = String(payload?.status || '').toLowerCase();
+    const hashOk = payload?.hash ? verifyResponseHash(payload) : true;
+    const gatewayPaymentId = payload?.easepayid || payload?.payment_id || txn_id;
 
-    if (statusData && statusData.code === 'PAYMENT_SUCCESS') {
-      const razorpay_payment_id = statusData.data.transactionId;
+    if (status === 'success' && hashOk) {
 
   // Fetch the order row
   const { data: orderRow, error: fetchErr } = await supabase
@@ -165,7 +173,7 @@ exports.phonepeCallback = async (req, res) => {
     .from('advance_payment_orders')
     .update({
       status: 'paid',
-      razorpay_payment_id,
+      razorpay_payment_id: gatewayPaymentId,
       paid_at: new Date().toISOString(),
     })
     .eq('id', order_row_id);
@@ -229,7 +237,7 @@ exports.phonepeCallback = async (req, res) => {
       }
     }
   } catch (err) {
-    console.error('[phonepeCallback] Post-credit settlement error:', err.message);
+    console.error('[easebuzzCallback] Post-credit settlement error:', err.message);
   }
 
   return res.redirect(`mybuilding://advance-payment?status=success`);
@@ -237,10 +245,12 @@ exports.phonepeCallback = async (req, res) => {
       return res.redirect(`mybuilding://advance-payment?status=failed`);
     }
   } catch (err) {
-    console.error("PhonePe callback error:", err);
+    console.error("Easebuzz callback error:", err);
     return res.redirect(`mybuilding://advance-payment?status=failed`);
   }
 };
+// Backward compatibility for existing route wiring
+exports.phonepeCallback = exports.easebuzzCallback;
 
 // GET /maintenance/advance/summary
 // Pramukh/admin only — all members with credit_balance and months_covered

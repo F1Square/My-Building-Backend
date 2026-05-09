@@ -143,7 +143,7 @@ exports.fixedLogin = async (req, res) => {
 
 // User signup
 exports.signup = async (req, res) => {
-  const { name, email, password, phone } = req.body;
+  const { name, email, password, phone, referral_code } = req.body;
 
   if (!name?.trim() || !email?.trim() || !password || !phone?.trim())
     return res.status(422).json({ error: 'All fields are required' });
@@ -160,6 +160,23 @@ exports.signup = async (req, res) => {
     .from('users').select('id').eq('phone', phone.trim()).single();
   if (existingPhone) return res.status(409).json({ error: 'An account with this phone number already exists' });
 
+  // Pre-validate referral code (if provided) BEFORE creating the user,
+  // so we don't create a half-finished account on a typo'd code.
+  let referrer = null;
+  const trimmedCode = referral_code?.trim().toUpperCase();
+  if (trimmedCode) {
+    const { data: r } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('referral_code', trimmedCode)
+      .maybeSingle();
+    if (!r) return res.status(422).json({ error: 'Invalid referral code' });
+    if (r.email && r.email.toLowerCase() === normalizedEmail) {
+      return res.status(422).json({ error: 'You cannot use your own referral code' });
+    }
+    referrer = r;
+  }
+
   const hash = await bcrypt.hash(password, 12);
   const { data, error } = await supabase
     .from('users')
@@ -168,6 +185,24 @@ exports.signup = async (req, res) => {
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
+
+  // Record referral right after signup so it appears in the referrer's
+  // Refer & Earn module immediately. inquiry_id stays NULL until the
+  // referee later submits a society registration; at that point the
+  // inquiry controller will fill in the inquiry/society fields.
+  if (referrer) {
+    const { error: refErr } = await supabase.from('referrals').insert({
+      referrer_id: referrer.id,
+      inquiry_id: null,
+      referee_name: data.name,
+      referee_email: data.email,
+      society_name: 'Awaiting society registration',
+    });
+    if (refErr) {
+      console.error('Failed to record signup referral:', refErr.message);
+    }
+  }
+
   res.status(201).json({ message: 'Account created successfully', user: data });
 };
 
@@ -212,12 +247,54 @@ exports.forgotPassword = async (req, res) => {
   if (!EMAIL_RE.test(email.trim())) return res.status(422).json({ error: 'Please enter a valid email address' });
 
   const normalizedEmail = email.toLowerCase().trim();
+  const adminEnvEmail = process.env.ADMIN_EMAIL?.toLowerCase().trim() || null;
+  const isAdmin = !!adminEnvEmail && normalizedEmail === adminEnvEmail;
 
-  // Check if user exists (DB users or admin)
-  const isAdmin = normalizedEmail === process.env.ADMIN_EMAIL?.toLowerCase().trim();
-  if (!isAdmin) {
-    const { data } = await supabase.from('users').select('id').eq('email', normalizedEmail).single();
-    if (!data) return res.status(404).json({ error: 'No account found with this email' });
+  // Find the user. Admins might not have a row in `users` yet if they've
+  // only ever signed in via fixedLogin (ADMIN_ID). Auto-create the row
+  // up-front so the OTP / verify / reset flow has something to attach to
+  // and so resetPassword can update a real bcrypt hash.
+  let userRow = null;
+  {
+    const { data } = await supabase
+      .from('users')
+      .select('id, role')
+      .eq('email', normalizedEmail)
+      .maybeSingle();
+    userRow = data || null;
+  }
+
+  if (!userRow) {
+    if (isAdmin) {
+      // Bootstrap the admin row with a placeholder hash. The real hash will
+      // overwrite this in resetPassword. Status is 'approved' so the admin
+      // can sign in immediately after the reset.
+      const { data: created, error: createErr } = await supabase
+        .from('users')
+        .insert({
+          name: 'Admin',
+          email: normalizedEmail,
+          role: 'admin',
+          status: 'approved',
+          password_hash: 'admin-no-direct-login',
+        })
+        .select('id, role')
+        .single();
+      if (createErr) {
+        console.error('forgotPassword: failed to bootstrap admin row:', createErr.message);
+        return res.status(500).json({ error: 'Could not initialise admin account. Please contact support.' });
+      }
+      userRow = created;
+    } else {
+      // Non-admin email that isn't registered. If ADMIN_EMAIL is missing
+      // and the requester *thinks* they're admin, give a clearer hint.
+      if (!adminEnvEmail) {
+        return res.status(404).json({
+          error: 'No account found with this email. (If you are the system admin, set ADMIN_EMAIL in the backend .env first.)',
+        });
+      }
+      return res.status(404).json({ error: 'No account found with this email' });
+    }
   }
 
   // Generate 6-digit OTP
@@ -306,13 +383,24 @@ exports.resetPassword = async (req, res) => {
 
   const hash = await bcrypt.hash(new_password, 12);
 
-  // Handle admin separately (ensure they exist in DB)
-  if (payload.email === process.env.ADMIN_EMAIL?.toLowerCase().trim()) {
-    const { data: adminUser } = await supabase.from('users').select('id').eq('email', payload.email).single();
-    if (!adminUser) {
-      await supabase.from('users').insert({ name: 'Admin', email: payload.email, role: 'admin', status: 'approved', password_hash: hash });
+  // forgotPassword already bootstrapped the admin row if missing, so a plain
+  // update is enough here. Defensive fallback: if for some reason the row
+  // disappeared between OTP and reset, recreate it for the admin email.
+  const { data: existing } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', payload.email)
+    .maybeSingle();
+
+  if (!existing) {
+    if (payload.email === process.env.ADMIN_EMAIL?.toLowerCase().trim()) {
+      const { error: insErr } = await supabase
+        .from('users')
+        .insert({ name: 'Admin', email: payload.email, role: 'admin', status: 'approved', password_hash: hash });
+      if (insErr) return res.status(500).json({ error: 'Failed to update password' });
       return res.json({ message: 'Password reset successfully. You can now log in.' });
     }
+    return res.status(404).json({ error: 'Account no longer exists. Please start the reset flow again.' });
   }
 
   const { error } = await supabase.from('users').update({ password_hash: hash }).eq('email', payload.email);

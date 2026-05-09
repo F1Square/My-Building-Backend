@@ -8,6 +8,7 @@ router.post('/pramukh', authenticate, requireRole('admin'), c.createPramukh);
 router.get('/my', authenticate, c.getMyBuilding);
 router.get('/', authenticate, requireRole('admin'), c.getAllBuildings);
 router.get('/search', authenticate, c.searchBuildings);
+router.get('/verify-code', authenticate, c.verifyBuildingCode);
 router.post('/join', authenticate, requireRole('user'), c.requestJoin);
 router.post('/join/handle', authenticate, requireRole('pramukh'), c.handleJoinRequest);
 router.get('/members/:building_id?', authenticate, requireRole('pramukh', 'admin', 'user'), c.getBuildingMembers);
@@ -18,6 +19,8 @@ router.post('/bank-details', authenticate, requireRole('admin'), c.saveBankDetai
 // Admin: user management
 router.get('/admin/users', authenticate, requireRole('admin'), c.getAllUsers);
 router.post('/admin/users', authenticate, requireRole('admin'), c.adminCreateUser);
+router.post('/admin/promote', authenticate, requireRole('admin'), c.adminPromoteToPramukh);
+router.post('/admin/demote', authenticate, requireRole('admin'), c.adminDemoteToUser);
 router.delete('/admin/users/:user_id', authenticate, requireRole('admin'), c.adminDeleteUser);
 router.delete('/:id', authenticate, requireRole('admin'), c.deleteBuilding);
 

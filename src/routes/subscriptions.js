@@ -4,8 +4,10 @@ const c = require('../controllers/subscriptionController');
 
 router.get('/me', authenticate, c.getMySubscription);
 router.post('/order', authenticate, c.createOrder);
-router.post('/phonepe-callback', c.phonepeCallback);
-router.get('/phonepe-callback', c.phonepeCallback);
+router.post('/easebuzz-callback', c.easebuzzCallback);
+router.get('/easebuzz-callback', c.easebuzzCallback);
+router.post('/phonepe-callback', c.easebuzzCallback); // Backward compatibility
+router.get('/phonepe-callback', c.easebuzzCallback);  // Backward compatibility
 
 // Admin
 router.get('/all', authenticate, requireRole('admin'), c.adminGetAll);
@@ -14,7 +16,7 @@ router.post('/revoke', authenticate, requireRole('admin'), c.adminRevoke);
 
 // Newspaper add-on toggle (existing subscribers)
 router.post('/newspaper-addon', authenticate, requireRole('user', 'pramukh'), c.toggleNewspaperAddon);
-// Newspaper add-on PhonePe order (₹3 charge)
+// Newspaper add-on gateway order
 router.post('/newspaper-addon/order', authenticate, requireRole('user', 'pramukh'), c.createNewspaperAddonOrder);
 
 // Validate promo code (web-friendly alias)

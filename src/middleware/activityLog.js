@@ -1,4 +1,4 @@
-const logActivity = require('../utils/activityLogger');
+const { logActivity, logError } = require('../utils/activityLogger');
 
 // Map route prefixes → module names
 const MODULE_MAP = {
@@ -109,61 +109,104 @@ function resolveAction(method, path) {
   return methodMap[method] || method.toLowerCase();
 }
 
+// Endpoints we never log against — would either cause loops (activity-logs
+// itself) or be pure noise (health checks, push-token registrations).
+const SKIP_MODULES = new Set(['activity-logs', 'health', 'app-config']);
+
 function resolveModule(path) {
   for (const [prefix, name] of Object.entries(MODULE_MAP)) {
     if (path.toLowerCase().includes(prefix)) return name;
   }
-  return 'unknown';
+  // Fall back to the first non-empty path segment so errors from newer
+  // endpoints (e.g. /newspapers, /refer, /society-rules) still surface.
+  const seg = path.replace(/^\/+/, '').split('/')[0]?.toLowerCase() || '';
+  if (!seg || SKIP_MODULES.has(seg)) return 'unknown';
+  return seg;
+}
+
+// Build the request-detail object once: shared by both success and error logs.
+function buildRequestDetail(req) {
+  const SENSITIVE = ['password', 'password_hash', 'token', 'secret', 'otp', 'razorpay_signature', 'hash', 'easebuzz_hash'];
+  const detail = {};
+  if (req.body && typeof req.body === 'object') {
+    for (const [k, v] of Object.entries(req.body)) {
+      if (SENSITIVE.includes(k.toLowerCase())) continue;
+      if (typeof v === 'string' && v.startsWith('data:image')) {
+        detail[k] = '[image attached]';
+      } else {
+        detail[k] = typeof v === 'string' && v.length > 300 ? v.slice(0, 300) + '…' : v;
+      }
+    }
+  }
+  if (req.params && Object.keys(req.params).length) detail._params = req.params;
+  if (req.query && Object.keys(req.query).length) {
+    const safeQuery = { ...req.query };
+    delete safeQuery.token;
+    if (Object.keys(safeQuery).length) detail._query = safeQuery;
+  }
+  return detail;
 }
 
 /**
- * Express middleware — logs all mutating requests (POST/PUT/PATCH/DELETE).
- * Attaches to the response 'finish' event so it captures the status code too.
- * Only logs if the user is authenticated (req.user exists).
+ * Express middleware — logs user/pramukh activity to the audit table.
+ *
+ * Logging policy (admin-readable):
+ *   • 2xx mutating request → level: 'info'  (existing audit trail)
+ *   • 5xx response         → level: 'error' (technical failure — admin must see)
+ *   • 4xx response         → SKIPPED        (validation / auth / not-found —
+ *                                            user input issues, not bugs)
+ *   • Admin role / unknown module → never logged
+ *
+ * Response body for failed requests is captured by wrapping res.json once,
+ * so the controller's `{ error: '...' }` message ends up in the log without
+ * touching individual controllers.
  */
 function activityLogMiddleware(req, res, next) {
-  // Only log mutating methods
-  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+  // Wrap res.json so we can keep a copy of whatever the controller sent back.
+  // Used only on error paths — for 2xx we never read it, so cost is negligible.
+  const originalJson = res.json.bind(res);
+  res.json = function capturedJson(body) {
+    res._capturedBody = body;
+    return originalJson(body);
+  };
 
   res.on('finish', () => {
-    // Only log if authenticated, non-admin, and request succeeded (2xx or 3xx)
-    if (!req.user || req.user.role === 'admin' || res.statusCode >= 400) return;
+    if (!req.user || req.user.role === 'admin') return;
+
+    const status = res.statusCode;
+    const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+
+    // Only two cases produce a log row:
+    //   1. Successful mutation (2xx/3xx, mutating method) — info level
+    //   2. Server error (5xx, ANY method including GET) — error level
+    // Everything else (4xx, GET 2xx) is dropped to keep the table small
+    // and the admin dashboard signal-rich.
+    const isSuccessMutation = status < 400 && isMutation;
+    const isServerError = status >= 500;
+    if (!isSuccessMutation && !isServerError) return;
+
+    const module = resolveModule(req.path);
+    if (module === 'unknown') return; // skip activity-logs itself, health checks, etc.
 
     const action = resolveAction(req.method, req.path);
-    const module = resolveModule(req.path);
-
-    // Skip logging for unknown modules (activity-logs itself, health checks, etc.)
-    if (module === 'unknown') return;
-
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
+    const detail = buildRequestDetail(req);
+    detail.path = req.originalUrl || req.path;
+    detail.method = req.method;
+    detail.status_code = status;
 
-    // Build a safe detail object — include body keys but strip sensitive fields
-    const SENSITIVE = ['password', 'password_hash', 'token', 'secret', 'otp', 'razorpay_signature'];
-    const detail = {};
-    if (req.body && typeof req.body === 'object') {
-      for (const [k, v] of Object.entries(req.body)) {
-        if (!SENSITIVE.includes(k.toLowerCase())) {
-          // Truncate long strings (e.g. base64 images) but keep meaningful data
-          if (typeof v === 'string' && v.startsWith('data:image')) {
-            detail[k] = '[image attached]';
-          } else {
-            detail[k] = typeof v === 'string' && v.length > 300 ? v.slice(0, 300) + '…' : v;
-          }
-        }
-      }
+    if (isServerError) {
+      // Pull the controller's error message out of the captured response body.
+      const body = res._capturedBody;
+      const msg =
+        (body && typeof body === 'object' && (body.error || body.message)) ||
+        (typeof body === 'string' ? body.slice(0, 500) : null) ||
+        'Server error';
+      detail.error_message = String(msg).slice(0, 500);
+      logError(req.user, action, module, detail, ip);
+    } else {
+      logActivity(req.user, action, module, detail, ip);
     }
-    // Add route params for context (e.g. complaint id, bill id)
-    if (req.params && Object.keys(req.params).length) {
-      detail._params = req.params;
-    }
-    // Add query params for context (e.g. building_id filters)
-    if (req.query && Object.keys(req.query).length) {
-      const safeQuery = { ...req.query };
-      delete safeQuery.token; // never log token query params
-      if (Object.keys(safeQuery).length) detail._query = safeQuery;
-    }
-
-    logActivity(req.user, action, module, detail, ip);
   });
 
   next();

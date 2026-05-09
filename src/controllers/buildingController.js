@@ -5,6 +5,14 @@ const ns = require('../utils/notificationService');
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_RE = /^[6-9]\d{9}$/;
 const IFSC_RE = /^[A-Z]{4}0[A-Z0-9]{6}$/;
+const BUILDING_CODE_RE = /^[A-Za-z0-9]{4,12}$/;
+
+const getBuildingCode = (id = '') => {
+  const normalized = String(id).trim();
+  if (!normalized) return '';
+  const firstChunk = normalized.split('-')[0];
+  return firstChunk.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+};
 
 // Admin: create building only (no pramukh)
 exports.createBuildingOnly = async (req, res) => {
@@ -83,31 +91,53 @@ exports.createBuilding = async (req, res) => {
 
 // User: request to join building
 exports.requestJoin = async (req, res) => {
-  const { building_id } = req.body;
+  const { building_id, building_code } = req.body || {};
   const user_id = req.user.id;
+  let resolvedBuildingId = building_id ? String(building_id).trim() : '';
 
-  if (!building_id) return res.status(422).json({ error: 'building_id is required' });
+  if (!resolvedBuildingId && building_code) {
+    const normalizedCode = String(building_code).trim().toLowerCase();
+    // UUID first segment is always 8 hex chars; validate accordingly
+    if (!/^[0-9a-f]{8}$/.test(normalizedCode)) {
+      return res.status(422).json({ error: 'Invalid building code. It must be exactly 8 characters (e.g. BCABE917).' });
+    }
+    // Use a UUID range instead of ILIKE — PostgreSQL UUID comparisons need no text cast
+    const lower = `${normalizedCode}-0000-0000-0000-000000000000`;
+    const upper = `${normalizedCode}-ffff-ffff-ffff-ffffffffffff`;
+    const { data: matched, error: matchErr } = await supabase
+      .from('buildings')
+      .select('id')
+      .gte('id', lower)
+      .lte('id', upper)
+      .limit(2);
+    if (matchErr) return res.status(400).json({ error: matchErr.message });
+    if (!matched || matched.length === 0) return res.status(404).json({ error: 'Building not found' });
+    if (matched.length > 1) return res.status(409).json({ error: 'Building code is not unique. Use full Building ID.' });
+    resolvedBuildingId = matched[0].id;
+  }
 
-  const { data: building } = await supabase.from('buildings').select('id').eq('id', building_id).single();
+  if (!resolvedBuildingId) return res.status(422).json({ error: 'building_id or building_code is required' });
+
+  const { data: building } = await supabase.from('buildings').select('id').eq('id', resolvedBuildingId).single();
   if (!building) return res.status(404).json({ error: 'Building not found' });
 
   // Prevent duplicate pending requests
   const { data: existing } = await supabase
-    .from('join_requests').select('id, status').eq('user_id', user_id).eq('building_id', building_id).single();
+    .from('join_requests').select('id, status').eq('user_id', user_id).eq('building_id', resolvedBuildingId).single();
   if (existing?.status === 'pending') return res.status(400).json({ error: 'You already have a pending request for this building' });
   if (existing?.status === 'approved') return res.status(400).json({ error: 'You are already a member of this building' });
 
-  const { error } = await supabase.from('join_requests').insert({ user_id, building_id, status: 'pending' });
+  const { error } = await supabase.from('join_requests').insert({ user_id, building_id: resolvedBuildingId, status: 'pending' });
   if (error) return res.status(400).json({ error: error.message });
 
-  await ns.notifyPramukh(building_id, {
+  await ns.notifyPramukh(resolvedBuildingId, {
     title: 'Join Request',
     body: `${req.user.name} wants to join your building`,
     type: 'join_request',
-    meta: { requester_id: user_id, building_id }
+    meta: { requester_id: user_id, building_id: resolvedBuildingId }
   });
 
-  res.json({ message: 'Join request sent' });
+  res.json({ message: 'Join request sent', building_code: getBuildingCode(resolvedBuildingId) });
 };
 
 // Pramukh: approve or reject join request
@@ -164,6 +194,7 @@ exports.getAllBuildings = async (req, res) => {
 
     return {
       ...b,
+      building_code: getBuildingCode(b.id),
       pramukh_name: pramukh?.name || null,
       member_count: bUsers.length,
       subscription_status: sub?.status || 'inactive'
@@ -177,21 +208,59 @@ exports.getAllBuildings = async (req, res) => {
 exports.searchBuildings = async (req, res) => {
   const { query } = req.query;
   if (!query || query.trim().length < 2) return res.json([]);
+  const normalizedQuery = query.trim();
   const { data, error } = await supabase
     .from('buildings')
     .select('id, name, address')
-    .ilike('name', `%${query.trim()}%`)
+    .ilike('name', `%${normalizedQuery}%`)
     .limit(10);
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json((data || []).map((b) => ({ ...b, building_code: getBuildingCode(b.id) })));
+};
+
+// Verify a building code and return the matched building (used by join screen)
+// Uses UUID range (gte/lte) to avoid the "operator does not exist: uuid ~~* unknown" error
+// that happens when trying to ILIKE on a UUID column, even with ::text casts.
+exports.verifyBuildingCode = async (req, res) => {
+  const { code } = req.query;
+  if (!code?.trim()) return res.status(400).json({ error: 'code is required' });
+
+  const normalized = code.trim().toLowerCase();
+  if (!/^[0-9a-f]{8}$/.test(normalized))
+    return res.status(422).json({ error: 'Invalid building code. It must be exactly 8 characters (e.g. BCABE917).' });
+
+  // Any UUID starting with the 8-char code falls in this range — no text cast needed
+  const lower = `${normalized}-0000-0000-0000-000000000000`;
+  const upper = `${normalized}-ffff-ffff-ffff-ffffffffffff`;
+
+  const { data, error } = await supabase
+    .from('buildings')
+    .select('id, name, address')
+    .gte('id', lower)
+    .lte('id', upper)
+    .limit(2);
+
+  if (error) return res.status(400).json({ error: error.message });
+  if (!data || data.length === 0)
+    return res.status(404).json({ error: 'No building found with that code. Check with your Pramukh.' });
+  if (data.length > 1)
+    return res.status(409).json({ error: 'Multiple buildings match this code. Please use the full Building ID.' });
+
+  const building = data[0];
+  res.json({ ...building, building_code: getBuildingCode(building.id) });
 };
 
 // Get building members (pramukh/admin)
 exports.getBuildingMembers = async (req, res) => {
   const building_id = req.user.role === 'admin' ? req.params.building_id : req.user.building_id;
+  // Admins get the full profile (incl. referral_code) for the user-detail
+  // modal; pramukh/user get a lighter projection.
+  const columns = req.user.role === 'admin'
+    ? 'id, name, email, phone, role, status, flat_no, wing, total_members, referral_code, created_at'
+    : 'id, name, email, phone, role, status, flat_no, wing';
   const { data, error } = await supabase
     .from('users')
-    .select('id, name, email, phone, role, status, flat_no, wing')
+    .select(columns)
     .eq('building_id', building_id)
     .order('flat_no', { ascending: true });
   if (error) return res.status(400).json({ error: error.message });
@@ -265,7 +334,7 @@ exports.getAllUsers = async (req, res) => {
 
   let query = supabase
     .from('users')
-    .select('id, name, email, phone, role, status, flat_no, building_id, buildings(name)')
+    .select('id, name, email, phone, role, status, flat_no, wing, total_members, referral_code, created_at, building_id, buildings(name)')
     .order('name', { ascending: true });
 
   if (building_id) query = query.eq('building_id', building_id);
@@ -329,6 +398,71 @@ exports.getMyBuilding = async (req, res) => {
     .single();
   if (error || !data) return res.status(404).json({ error: 'Building not found' });
   res.json(data);
+};
+
+// Admin: promote a user → pramukh
+exports.adminPromoteToPramukh = async (req, res) => {
+  const { user_id } = req.body;
+  if (!user_id) return res.status(422).json({ error: 'user_id is required' });
+
+  const { data: user, error: fetchErr } = await supabase
+    .from('users')
+    .select('id, role, building_id, name, email')
+    .eq('id', user_id)
+    .single();
+  if (fetchErr || !user) return res.status(404).json({ error: 'User not found' });
+  if (user.role === 'admin') return res.status(403).json({ error: 'Cannot change admin role' });
+  if (user.role === 'pramukh') return res.status(400).json({ error: 'User is already a pramukh' });
+  if (!user.building_id) return res.status(400).json({ error: 'User must be assigned to a building before being promoted' });
+
+  const { error } = await supabase
+    .from('users')
+    .update({ role: 'pramukh', status: 'approved' })
+    .eq('id', user_id);
+  if (error) return res.status(400).json({ error: error.message });
+
+  // Best-effort notification — don't fail the request if it errors.
+  try {
+    await ns.notifyUser(user_id, {
+      title: 'You are now a Pramukh ⭐',
+      body: 'An admin has promoted you to Pramukh. You now have building management access.',
+      type: 'role_change',
+      meta: { role: 'pramukh' },
+    });
+  } catch (_) { /* noop */ }
+
+  res.json({ message: 'User promoted to pramukh', user_id, role: 'pramukh' });
+};
+
+// Admin: demote a pramukh → user
+exports.adminDemoteToUser = async (req, res) => {
+  const { user_id } = req.body;
+  if (!user_id) return res.status(422).json({ error: 'user_id is required' });
+
+  const { data: user, error: fetchErr } = await supabase
+    .from('users')
+    .select('id, role')
+    .eq('id', user_id)
+    .single();
+  if (fetchErr || !user) return res.status(404).json({ error: 'User not found' });
+  if (user.role !== 'pramukh') return res.status(400).json({ error: 'Only a pramukh can be demoted' });
+
+  const { error } = await supabase
+    .from('users')
+    .update({ role: 'user' })
+    .eq('id', user_id);
+  if (error) return res.status(400).json({ error: error.message });
+
+  try {
+    await ns.notifyUser(user_id, {
+      title: 'Role updated',
+      body: 'An admin has updated your role to User.',
+      type: 'role_change',
+      meta: { role: 'user' },
+    });
+  } catch (_) { /* noop */ }
+
+  res.json({ message: 'Pramukh demoted to user', user_id, role: 'user' });
 };
 
 // Admin: delete a user
@@ -435,16 +569,22 @@ exports.deleteBuilding = async (req, res) => {
       supabase.from('referrals').delete().eq('inquiry_id', id)
     ];
 
-    await Promise.all(buildingScopedDeletes);
+    const phase1Results = await Promise.all(buildingScopedDeletes);
+    phase1Results.forEach((r, i) => {
+      if (r.error) console.warn(`[Admin] Phase 1 delete #${i} error (non-fatal):`, r.error.message);
+    });
 
-    // 3. Phase 2: Delete user-specific records that don't have building_id
-    // These tables reference users(id) and must be cleared before users can be deleted
+    // 3. Phase 2: Delete user-specific records by user_id.
+    // maintenance_bills and maintenance_payments are already targeted by building_id
+    // above, but we repeat them here keyed on created_by / user_id as a safety net —
+    // Supabase never throws on silent FK errors so Phase 1 may leave orphans.
     if (userIds.length > 0) {
       console.log(`[Admin] Cleaning up user-linked tables for ${userIds.length} users...`);
       const userScopedDeletes = [
+        supabase.from('maintenance_bills').delete().in('created_by', userIds),
+        supabase.from('maintenance_payments').delete().in('user_id', userIds),
         supabase.from('subscriptions').delete().in('user_id', userIds),
         supabase.from('notifications').delete().in('user_id', userIds),
-        // Add any other user-specific tables here
       ];
       await Promise.all(userScopedDeletes);
     }

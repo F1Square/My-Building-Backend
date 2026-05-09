@@ -3,18 +3,31 @@ const multer = require('multer');
 // Configure multer for memory storage (no disk writes)
 const storage = multer.memoryStorage();
 
-// File filter for image validation
+// File filter (RN/Android often sends application/octet-stream or omits mimetype)
+const allowedMimeTypes = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+
 const fileFilter = (req, file, cb) => {
-  // Check file type
-  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-  
-  if (allowedTypes.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    const error = new Error('Invalid file type. Only JPEG, PNG, and WebP are allowed.');
-    error.code = 'INVALID_FILE_TYPE';
-    cb(error, false);
+  let mime = (file.mimetype || '').toLowerCase().trim();
+  if (mime === 'image/jpg') mime = 'image/jpeg';
+
+  if (allowedMimeTypes.has(mime)) {
+    return cb(null, true);
   }
+
+  const name = (file.originalname || file.filename || '').toLowerCase();
+  if (
+    !mime ||
+    mime === 'application/octet-stream' ||
+    mime === 'binary/octet-stream'
+  ) {
+    if (/\.(jpe?g|png|webp)$/i.test(name)) {
+      return cb(null, true);
+    }
+  }
+
+  const error = new Error('Invalid file type. Only JPEG, PNG, and WebP are allowed.');
+  error.code = 'INVALID_FILE_TYPE';
+  cb(error, false);
 };
 
 // Multer configuration

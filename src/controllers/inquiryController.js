@@ -71,13 +71,31 @@ exports.submitInquiry = async (req, res) => {
       return res.status(422).json({ error: 'Self-referral is not permitted' });
     }
 
-    await supabase.from('referrals').insert({
-      referrer_id: referrer.id,
-      inquiry_id: data.id,
-      referee_name: req.user.name,
-      referee_email: req.user.email,
-      society_name: society_name.trim(),
-    });
+    // If a signup-time referral already exists for this (referrer, referee)
+    // with no inquiry attached, attach the new inquiry/society to it
+    // instead of creating a duplicate row.
+    const { data: existing } = await supabase
+      .from('referrals')
+      .select('id')
+      .eq('referrer_id', referrer.id)
+      .eq('referee_email', req.user.email)
+      .is('inquiry_id', null)
+      .maybeSingle();
+
+    if (existing) {
+      await supabase
+        .from('referrals')
+        .update({ inquiry_id: data.id, society_name: society_name.trim() })
+        .eq('id', existing.id);
+    } else {
+      await supabase.from('referrals').insert({
+        referrer_id: referrer.id,
+        inquiry_id: data.id,
+        referee_name: req.user.name,
+        referee_email: req.user.email,
+        society_name: society_name.trim(),
+      });
+    }
   }
 
   res.status(201).json({ message: 'Inquiry submitted', inquiry: data });
@@ -137,9 +155,15 @@ exports.submitPublicInquiry = async (req, res) => {
 
 // Admin: get all inquiries
 exports.getInquiries = async (req, res) => {
-  const { status } = req.query;
+  const { status, search } = req.query;
   let query = supabase.from('building_inquiries').select('*').order('created_at', { ascending: false });
   if (status) query = query.eq('status', status);
+  if (search?.trim()) {
+    const term = `%${search.trim()}%`;
+    query = query.or(
+      `society_name.ilike.${term},city.ilike.${term},state.ilike.${term},user_name.ilike.${term},user_email.ilike.${term}`
+    );
+  }
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);

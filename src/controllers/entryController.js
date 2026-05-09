@@ -61,7 +61,9 @@ exports.getBuildingInfo = async (req, res) => {
     .from('buildings').select('id, name, address').eq('id', building_id).single();
   if (error || !data) return res.status(404).send('<h2>Building not found</h2>');
 
-  const backendUrl = process.env.BACKEND_URL || '';
+  const backendUrl = process.env.NODE_ENV === 'production'
+    ? (process.env.BACKEND_URL || '')
+    : `${req.protocol}://${req.get('host')}`;
 
   res.setHeader('Content-Type', 'text/html');
   res.send(`<!DOCTYPE html>

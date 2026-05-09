@@ -1,14 +1,26 @@
 const supabase = require('../supabase');
 
-// Get notifications for logged-in user (unread only)
+// Get notifications for logged-in user.
+// Default: unread only. Pass ?recent=1 (or recent=true) for inbox: last 50
+// regardless of read state (used by the home notification sheet).
 exports.getNotifications = async (req, res) => {
-  const { data, error } = await supabase
+  const recent =
+    req.query.recent === '1' ||
+    req.query.recent === 'true' ||
+    req.query.include_read === '1';
+
+  let q = supabase
     .from('notifications')
     .select('*')
     .eq('user_id', req.user.id)
-    .eq('is_read', false)
     .order('created_at', { ascending: false })
     .limit(50);
+
+  if (!recent) {
+    q = q.eq('is_read', false);
+  }
+
+  const { data, error } = await q;
 
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);
@@ -66,12 +78,17 @@ exports.getUnreadCounts = async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
 
+  /** Per-type counts from unread notification rows only */
   const counts = {};
   for (const n of data || []) {
     counts[n.type] = (counts[n.type] || 0) + 1;
   }
 
-  // For pramukh: also count pending join requests directly (covers pre-existing ones with no notification)
+  /** Bell badge on home = unread rows only (not pending joins without a notification row) */
+  const bell_unread = Object.values(counts).reduce((sum, n) => sum + n, 0);
+
+  // For pramukh: inflate join_request for MODULE tile badges only (pending rows without notifications).
+  // bell_unread stays notification-only so opening/closing the inbox clears the bell correctly.
   if (req.user.role === 'pramukh' && req.user.building_id) {
     const { count } = await supabase
       .from('join_requests')
@@ -80,9 +97,9 @@ exports.getUnreadCounts = async (req, res) => {
       .eq('status', 'pending');
 
     if (count > 0) {
-      counts['join_request'] = Math.max(counts['join_request'] || 0, count);
+      counts.join_request = Math.max(counts.join_request || 0, count);
     }
   }
 
-  res.json(counts);
+  res.json({ counts, bell_unread });
 };

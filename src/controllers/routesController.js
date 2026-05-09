@@ -1,10 +1,10 @@
 /**
- * Simplified Razorpay Payment System
+ * Simplified Gateway Settlement System
  *
  * Flow:
- * 1. Society manually creates Razorpay account and submits Account ID
- * 2. Payment transfers are made to the submitted Account ID
- * 3. Society views all transactions in their Razorpay dashboard
+ * 1. Society submits its payment routing account ID
+ * 2. Maintenance collections are tagged for society settlement
+ * 3. Subscriptions are tagged for admin settlement
  */
 
 const supabase = require('../supabase');
@@ -41,13 +41,13 @@ exports.getAccountStatus = async (req, res) => {
 
 // ── Manual transfer retry for debugging ──────────────────────────────────
 exports.retryTransfer = async (req, res) => {
-  res.status(400).json({ error: 'Split transfers are temporarily disabled while migrating to PhonePe.' });
+  res.status(400).json({ error: 'Manual transfer retry is disabled in current gateway-managed flow.' });
 };
 
 // ── Transfer funds to account (called after payment capture) ────────
 exports.transferToAccount = async (payment_id, account_id, amount_paise, notes = {}) => {
   return { 
     success: false, 
-    error: 'Split transfers are temporarily disabled while migrating to PhonePe.' 
+    error: 'Direct transfer call is disabled in current gateway-managed flow.' 
   };
 };
