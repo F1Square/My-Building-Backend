@@ -123,8 +123,6 @@ exports.reportParking = async (req, res) => {
 
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
   if (!description?.trim()) return res.status(422).json({ error: 'Description is required' });
-  const wordCount = description.trim().split(/\s+/).filter(Boolean).length;
-  if (wordCount < 5) return res.status(422).json({ error: 'Description must be at least 5 words' });
   if (description.trim().length > 500) return res.status(422).json({ error: 'Description must not exceed 500 characters' });
 
   const { data, error } = await supabase
