@@ -1,5 +1,6 @@
 const supabase = require('../supabase');
 const crypto = require('crypto');
+const { getPlanRupeeBase } = require('../utils/subscriptionPlans');
 
 // Generate a random uppercase code like "SAVE20" or "FLAT150"
 function generateCode(prefix = '') {
@@ -66,6 +67,7 @@ exports.deletePromo = async (req, res) => {
 exports.validatePromo = async (req, res) => {
   const { code, plan } = req.body;
   if (!code?.trim()) return res.status(422).json({ error: 'code is required' });
+  if (!plan?.trim()) return res.status(422).json({ error: 'plan is required' });
 
   const { data: promo, error } = await supabase
     .from('promo_codes')
@@ -78,9 +80,8 @@ exports.validatePromo = async (req, res) => {
   if (promo.expires_at && new Date(promo.expires_at) < new Date())
     return res.status(400).json({ error: 'This promo code has expired' });
 
-  // Calculate discounted amount for the plan
-  const PLAN_PRICES = { monthly: 15, yearly: 180, lifetime: 1500 };
-  const original = PLAN_PRICES[plan] || 0;
+  // Calculate discounted amount for the plan (rupees — matches promoController expectations)
+  const original = await getPlanRupeeBase(plan);
   let discount = 0;
   if (promo.type === 'percent') {
     discount = Math.round((original * promo.value) / 100);

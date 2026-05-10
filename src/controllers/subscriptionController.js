@@ -1,12 +1,11 @@
 const supabase = require('../supabase');
 const crypto = require('crypto');
 const { getBackendUrl } = require('../utils/backendUrl');
-
-const PLANS = {
-  monthly:  { amount: 1500,   label: '₹15/month',    months: 1  },   // paise
-  yearly:   { amount: 18000,  label: '₹180/year',    months: 12 },
-  lifetime: { amount: 150000, label: '₹1500 lifetime', months: null },
-};
+const {
+  getPlanForPayment,
+  getPlanRupeeBase,
+  listPublicPlans,
+} = require('../utils/subscriptionPlans');
 
 // Get current user's subscription
 exports.getMySubscription = async (req, res) => {
@@ -23,18 +22,154 @@ exports.getMySubscription = async (req, res) => {
   });
 };
 
+// Public: active plans for subscribe UI
+exports.publicListPlans = async (req, res) => {
+  try {
+    const plans = await listPublicPlans();
+    res.json(plans);
+  } catch (e) {
+    console.error('publicListPlans', e);
+    res.status(500).json({ error: 'Failed to load plans' });
+  }
+};
+
+// Admin: all plans (including inactive)
+exports.adminListPlans = async (req, res) => {
+  const { data, error } = await supabase
+    .from('subscription_plans')
+    .select('*')
+    .order('sort_order', { ascending: true });
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data || []);
+};
+
+exports.adminCreatePlan = async (req, res) => {
+  const {
+    slug, title, description, amount_paise, months,
+    allow_newspaper_addon, newspaper_addon_paise, sort_order, features, is_active,
+  } = req.body;
+
+  if (!slug?.trim() || !title?.trim() || amount_paise == null) {
+    return res.status(422).json({ error: 'slug, title, and amount_paise are required' });
+  }
+  const cleanSlug = String(slug).trim().toLowerCase();
+  if (!/^[a-z0-9_-]+$/.test(cleanSlug)) {
+    return res.status(422).json({ error: 'slug must be lowercase letters, numbers, hyphens or underscores' });
+  }
+  const paise = parseInt(amount_paise, 10);
+  if (Number.isNaN(paise) || paise < 100) {
+    return res.status(422).json({ error: 'amount_paise must be at least 100 (₹1)' });
+  }
+  let monthsVal = months === null || months === '' ? null : parseInt(months, 10);
+  if (monthsVal !== null && (Number.isNaN(monthsVal) || monthsVal < 1 || monthsVal > 120)) {
+    return res.status(422).json({ error: 'months must be 1–120 or null for lifetime' });
+  }
+
+  const row = {
+    slug: cleanSlug,
+    title: title.trim(),
+    description: description?.trim() || null,
+    amount_paise: paise,
+    months: monthsVal,
+    allow_newspaper_addon: allow_newspaper_addon !== false,
+    newspaper_addon_paise: newspaper_addon_paise == null || newspaper_addon_paise === ''
+      ? null
+      : (() => {
+          const n = parseInt(newspaper_addon_paise, 10);
+          return Number.isNaN(n) ? null : n;
+        })(),
+    sort_order: sort_order == null ? 0 : parseInt(sort_order, 10) || 0,
+    is_active: is_active !== false,
+    features: Array.isArray(features) ? features : [],
+  };
+
+  const { data, error } = await supabase.from('subscription_plans').insert(row).select().single();
+  if (error) return res.status(400).json({ error: error.message });
+  res.status(201).json(data);
+};
+
+exports.adminUpdatePlan = async (req, res) => {
+  const { id } = req.params;
+  const {
+    slug, title, description, amount_paise, months,
+    allow_newspaper_addon, newspaper_addon_paise, sort_order, features, is_active,
+  } = req.body;
+
+  const patch = {};
+  if (title != null) patch.title = String(title).trim();
+  if (description !== undefined) patch.description = description?.trim() || null;
+  if (amount_paise != null) {
+    const paise = parseInt(amount_paise, 10);
+    if (Number.isNaN(paise) || paise < 100) {
+      return res.status(422).json({ error: 'amount_paise must be at least 100' });
+    }
+    patch.amount_paise = paise;
+  }
+  if (months !== undefined) {
+    if (months === null || months === '') patch.months = null;
+    else {
+      const m = parseInt(months, 10);
+      if (Number.isNaN(m) || m < 1 || m > 120) {
+        return res.status(422).json({ error: 'months must be 1–120 or null' });
+      }
+      patch.months = m;
+    }
+  }
+  if (slug != null) {
+    const cleanSlug = String(slug).trim().toLowerCase();
+    if (!/^[a-z0-9_-]+$/.test(cleanSlug)) {
+      return res.status(422).json({ error: 'invalid slug' });
+    }
+    patch.slug = cleanSlug;
+  }
+  if (allow_newspaper_addon !== undefined) patch.allow_newspaper_addon = !!allow_newspaper_addon;
+  if (newspaper_addon_paise !== undefined) {
+    patch.newspaper_addon_paise = newspaper_addon_paise == null ? null : parseInt(newspaper_addon_paise, 10);
+  }
+  if (sort_order != null) patch.sort_order = parseInt(sort_order, 10) || 0;
+  if (is_active !== undefined) patch.is_active = !!is_active;
+  if (features !== undefined) patch.features = Array.isArray(features) ? features : [];
+  patch.updated_at = new Date().toISOString();
+
+  const { data, error } = await supabase
+    .from('subscription_plans')
+    .update(patch)
+    .eq('id', id)
+    .select()
+    .single();
+  if (error) return res.status(400).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Plan not found' });
+  res.json(data);
+};
+
+/** Soft-delete: deactivate plan (existing subscriber slugs still work via fallback/history). */
+exports.adminDeletePlan = async (req, res) => {
+  const { id } = req.params;
+  const { error } = await supabase
+    .from('subscription_plans')
+    .update({ is_active: false, updated_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Plan deactivated' });
+};
+
 // Create Easebuzz order for subscription
 exports.createOrder = async (req, res) => {
   const { plan, promo_id, include_newspaper } = req.body;
-  if (!PLANS[plan]) return res.status(422).json({ error: 'Invalid plan. Choose monthly, yearly or lifetime' });
+  const planInfo = await getPlanForPayment(plan);
+  if (!planInfo) return res.status(422).json({ error: 'Invalid or inactive plan' });
 
-  const planInfo = PLANS[plan];
-  let amount = planInfo.amount; // paise
-  // Newspaper add-on pricing based on plan type
+  let amount = planInfo.amount_paise; // paise
+  // Newspaper add-on
   if (include_newspaper) {
-    if (plan === 'lifetime') return res.status(400).json({ error: 'Newspaper add-on is not available for lifetime plan' });
-    else if (plan === 'yearly') amount += 3600; // ₹36
-    else amount += 300; // ₹3
+    if (!planInfo.allow_newspaper_addon) {
+      return res.status(400).json({ error: 'Newspaper add-on is not available for this plan' });
+    }
+    let addon = planInfo.newspaper_addon_paise;
+    if (addon == null || Number.isNaN(addon)) {
+      addon = planInfo.months === 12 ? 3600 : 300;
+    }
+    amount += addon;
   }
   let appliedPromo = null;
 
@@ -101,19 +236,21 @@ exports.createOrder = async (req, res) => {
 // Admin: grant free subscription manually
 exports.adminGrant = async (req, res) => {
   const { user_id, plan, months, remark } = req.body;
-  if (!user_id || !PLANS[plan]) return res.status(422).json({ error: 'user_id and valid plan required' });
+  const planCfg = await getPlanForPayment(plan);
+  if (!user_id || !planCfg) return res.status(422).json({ error: 'user_id and valid active plan slug required' });
   if (months !== undefined && (isNaN(Number(months)) || Number(months) < 1 || Number(months) > 120))
     return res.status(422).json({ error: 'months must be between 1 and 120' });
 
   const now = new Date();
-  const expires_at = plan === 'lifetime' ? null
-    : new Date(now.getFullYear(), now.getMonth() + (months || 1), now.getDate()).toISOString();
+  const termMonths = planCfg.months == null ? null : (months != null ? Number(months) : planCfg.months);
+  const expires_at = termMonths == null ? null
+    : new Date(now.getFullYear(), now.getMonth() + termMonths, now.getDate()).toISOString();
 
   const { data: existing } = await supabase
     .from('subscriptions').select('id').eq('user_id', user_id).single();
 
   const payload = {
-    user_id, plan, status: 'active',
+    user_id, plan: planCfg.slug, status: 'active',
     started_at: now.toISOString(), expires_at,
     razorpay_payment_id: 'admin_grant',
     remark: remark?.trim() || null,
@@ -140,12 +277,33 @@ exports.adminRevoke = async (req, res) => {
   res.json({ message: 'Subscription and newspaper addon revoked' });
 };
 
-// Admin: get all subscriptions with user details
+// Admin: list subscriptions with user details (search + pagination for large directories)
 exports.adminGetAll = async (req, res) => {
-  const { data, error } = await supabase
+  const search = (req.query.q || '').trim();
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+  let userIds = null;
+  if (search) {
+    const term = `%${search}%`;
+    const { data: matchedUsers, error: uErr } = await supabase
+      .from('users')
+      .select('id')
+      .or(`email.ilike.${term},name.ilike.${term}`);
+    if (uErr) return res.status(400).json({ error: uErr.message });
+    userIds = (matchedUsers || []).map((u) => u.id);
+    if (userIds.length === 0) return res.json([]);
+  }
+
+  let query = supabase
     .from('subscriptions')
     .select('*, remark, paid_amount, promo_code_used, users(name, email, role, building_id, buildings(name))')
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (userIds) query = query.in('user_id', userIds);
+
+  const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
   res.json((data || []).map((row) => ({
     ...row,
@@ -167,8 +325,7 @@ exports.requireSubscription = async (req, res, next) => {
 
   if (!data) return res.status(402).json({ error: 'subscription_required', message: 'Active subscription required' });
 
-  // Check expiry for monthly
-  if (data.plan === 'monthly' && data.expires_at && new Date(data.expires_at) < new Date()) {
+  if (data.expires_at && new Date(data.expires_at) < new Date()) {
     await supabase.from('subscriptions').update({ status: 'expired' }).eq('user_id', req.user.id);
     return res.status(402).json({ error: 'subscription_expired', message: 'Your subscription has expired' });
   }
@@ -208,8 +365,10 @@ exports.easebuzzCallback = async (req, res) => {
       } else {
         // Subscription activation
         const now = new Date();
-        const expires_at = plan === 'lifetime' ? null
-          : new Date(now.getFullYear(), now.getMonth() + (PLANS[plan]?.months || 1), now.getDate()).toISOString();
+        const planCfg = await getPlanForPayment(plan);
+        const months = planCfg?.months;
+        const expires_at = months == null ? null
+          : new Date(now.getFullYear(), now.getMonth() + months, now.getDate()).toISOString();
 
         const { data: existing } = await supabase
           .from('subscriptions').select('id').eq('user_id', user_id).single();
@@ -237,6 +396,7 @@ exports.easebuzzCallback = async (req, res) => {
 
         // Record paid amount + promo usage. Easebuzz returns "amount" in rupees as a string.
         const paidAmountRupees = Math.round(Number(gatewayPayload?.amount || 0));
+        const fallbackRupee = await getPlanRupeeBase(plan);
         if (promo_id) {
           const { markPromoUsed } = require('./promoController');
           await markPromoUsed(promo_id, user_id);
@@ -246,9 +406,8 @@ exports.easebuzzCallback = async (req, res) => {
             promo_code_used: promo?.code || null,
           }).eq('user_id', user_id);
         } else {
-          const PLAN_PRICES = { monthly: 15, yearly: 180, lifetime: 1500 };
           await supabase.from('subscriptions').update({
-            paid_amount: paidAmountRupees || PLAN_PRICES[plan] || null,
+            paid_amount: paidAmountRupees || fallbackRupee || null,
             promo_code_used: null,
           }).eq('user_id', user_id);
         }
@@ -288,17 +447,20 @@ exports.createNewspaperAddonOrder = async (req, res) => {
 
   const { plan: requestedPlan } = req.body;
   const addonPlan = requestedPlan || sub.plan;
-  
-  const ADDON_PRICES = {
-    monthly: 300,   // ₹3
-    yearly: 3600,   // ₹36
-  };
 
-  if (!ADDON_PRICES[addonPlan]) {
-    return res.status(422).json({ error: 'Invalid newspaper plan. Choose monthly or yearly' });
+  const addonCfg = await getPlanForPayment(addonPlan);
+  if (!addonCfg) {
+    return res.status(422).json({ error: 'Invalid plan for newspaper add-on' });
+  }
+  if (!addonCfg.allow_newspaper_addon) {
+    return res.status(400).json({ error: 'Newspaper add-on is not available for this plan' });
   }
 
-  const addonAmount = ADDON_PRICES[addonPlan];
+  let addonAmount = addonCfg.newspaper_addon_paise;
+  if (addonAmount == null || Number.isNaN(addonAmount)) {
+    if (addonPlan === 'yearly' || addonCfg.months === 12) addonAmount = 3600;
+    else addonAmount = NEWSPAPER_ADDON_AMOUNT;
+  }
 
   try {
     const { initiatePayment } = require('../utils/easebuzzHelper');
@@ -398,16 +560,16 @@ exports.upgradePlan = async (req, res) => {
     .eq('id', plan_id)
     .single();
 
-  if (!plan) return res.status(404).json({ error: 'Plan not found' });
+  if (!plan || !plan.is_active) return res.status(404).json({ error: 'Plan not found or inactive' });
 
   const now = new Date();
-  const expires_at = plan.duration_days
-    ? new Date(now.getTime() + plan.duration_days * 24 * 60 * 60 * 1000).toISOString()
-    : null;
+  const months = plan.months;
+  const expires_at = months == null ? null
+    : new Date(now.getFullYear(), now.getMonth() + months, now.getDate()).toISOString();
 
   const { error } = await supabase
     .from('subscriptions')
-    .update({ plan: plan.name, status: 'active', started_at: now.toISOString(), expires_at })
+    .update({ plan: plan.slug, status: 'active', started_at: now.toISOString(), expires_at })
     .eq('user_id', req.user.id);
 
   if (error) return res.status(400).json({ error: error.message });

@@ -2,6 +2,14 @@ const router = require('express').Router();
 const { authenticate, requireRole } = require('../middleware/auth');
 const c = require('../controllers/subscriptionController');
 
+router.get('/plans', c.publicListPlans);
+
+// Admin — register `/plans/admin` before any `/plans/:id` style routes
+router.get('/plans/admin', authenticate, requireRole('admin'), c.adminListPlans);
+router.post('/plans/admin', authenticate, requireRole('admin'), c.adminCreatePlan);
+router.patch('/plans/admin/:id', authenticate, requireRole('admin'), c.adminUpdatePlan);
+router.delete('/plans/admin/:id', authenticate, requireRole('admin'), c.adminDeletePlan);
+
 router.get('/me', authenticate, c.getMySubscription);
 router.post('/order', authenticate, c.createOrder);
 router.post('/easebuzz-callback', c.easebuzzCallback);

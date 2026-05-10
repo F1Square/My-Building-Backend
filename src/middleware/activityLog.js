@@ -81,6 +81,11 @@ function resolveAction(method, path) {
   if (p.includes('/announcements') && method === 'POST')   return 'create_announcement';
   if (p.includes('/announcements') && method === 'DELETE') return 'delete_announcement';
 
+  // Subscription plans (admin catalog)
+  if (p.includes('/subscriptions/plans/admin') && method === 'POST') return 'admin_create_subscription_plan';
+  if (p.includes('/subscriptions/plans/admin') && (method === 'PATCH' || method === 'PUT')) return 'admin_update_subscription_plan';
+  if (p.includes('/subscriptions/plans/admin') && method === 'DELETE') return 'admin_deactivate_subscription_plan';
+
   // Subscriptions
   if (p.includes('/subscriptions') && p.includes('/grant'))  return 'admin_grant_subscription';
   if (p.includes('/subscriptions') && p.includes('/revoke')) return 'admin_revoke_subscription';
