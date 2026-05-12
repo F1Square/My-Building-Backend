@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const supabase = require('../supabase');
+const { logActivity } = require('../utils/activityLogger');
 
 // Helper: fetch active subscription for a user
 const getSubscription = async (user_id) => {
@@ -35,8 +36,10 @@ exports.unifiedLogin = async (req, res) => {
     return res.status(422).json({ error: 'Email and password are required' });
 
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!EMAIL_RE.test(email.trim()))
+  if (!EMAIL_RE.test(email.trim())) {
+    logActivity({ email: email.trim() }, 'login_failed', 'auth', { reason: 'Invalid email format' }, req.ip, 'info');
     return res.status(422).json({ error: 'Please enter a valid email address' });
+  }
 
   const normalizedEmail = email.toLowerCase().trim();
 
@@ -58,6 +61,7 @@ exports.unifiedLogin = async (req, res) => {
     }
 
     if (!valid) {
+      logActivity({ email: normalizedEmail, role: 'admin' }, 'login_failed', 'auth', { reason: 'Invalid admin credentials' }, req.ip, 'info');
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -73,6 +77,7 @@ exports.unifiedLogin = async (req, res) => {
 
     if (!adminUser) return res.status(500).json({ error: 'Admin record could not be resolved' });
 
+    logActivity({ id: adminUser.id, name: 'Admin', role: 'admin' }, 'login_success', 'auth', {}, req.ip, 'info');
     const token = signToken({ id: adminUser.id, role: 'admin', name: 'Admin', email: normalizedEmail });
     return res.json({ token, user: { id: adminUser.id, name: 'Admin', email: normalizedEmail, role: 'admin' } });
   }
@@ -84,11 +89,18 @@ exports.unifiedLogin = async (req, res) => {
     .eq('email', normalizedEmail)
     .single();
 
-  if (error || !data) return res.status(401).json({ error: 'Invalid email or password' });
+  if (error || !data) {
+    logActivity({ email: normalizedEmail }, 'login_failed', 'auth', { reason: 'User not found or invalid email' }, req.ip, 'info');
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
 
   const valid = await bcrypt.compare(password, data.password_hash);
-  if (!valid) return res.status(401).json({ error: 'Invalid email or password' });
+  if (!valid) {
+    logActivity({ id: data.id, name: data.name, role: data.role, building_id: data.building_id }, 'login_failed', 'auth', { reason: 'Invalid password' }, req.ip, 'info');
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
 
+  logActivity({ id: data.id, name: data.name, role: data.role, building_id: data.building_id }, 'login_success', 'auth', {}, req.ip, 'info');
   const token = signToken({ id: data.id, role: data.role, name: data.name, building_id: data.building_id, flat_no: data.flat_no });
   const subscription = await getSubscription(data.id);
   return res.json({
@@ -219,11 +231,18 @@ exports.login = async (req, res) => {
     .eq('email', email.toLowerCase().trim())
     .single();
 
-  if (error || !data) return res.status(401).json({ error: 'Invalid email or password' });
+  if (error || !data) {
+    logActivity({ email: email.toLowerCase().trim() }, 'login_failed', 'auth', { reason: 'User not found or invalid email' }, req.ip, 'info');
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
 
   const valid = await bcrypt.compare(password, data.password_hash);
-  if (!valid) return res.status(401).json({ error: 'Invalid email or password' });
+  if (!valid) {
+    logActivity({ id: data.id, name: data.name, role: data.role, building_id: data.building_id }, 'login_failed', 'auth', { reason: 'Invalid password' }, req.ip, 'info');
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
 
+  logActivity({ id: data.id, name: data.name, role: data.role, building_id: data.building_id }, 'login_success', 'auth', {}, req.ip, 'info');
   res.json({
     token: signToken({ id: data.id, role: data.role, name: data.name, building_id: data.building_id }),
     subscription: await getSubscription(data.id),

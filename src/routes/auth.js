@@ -3,6 +3,7 @@ const { fixedLogin, signup, login, unifiedLogin, getMe, forgotPassword, verifyOt
 const { authenticate } = require('../middleware/auth');
 const { validate, required, isEmail, minLen, isPhone, isStrongPassword } = require('../utils/validators');
 const rateLimiter = require('../middleware/rateLimiter');
+const { logActivity } = require('../utils/activityLogger');
 
 // Rate limiters for auth endpoints
 const loginLimiter = rateLimiter(10, 60_000);       // 10 attempts/min
@@ -13,6 +14,17 @@ const otpLimiter = rateLimiter(10, 60_000);          // 10 OTP verifications/min
 router.post('/fixed-login', loginLimiter, fixedLogin);
 router.post('/login/unified', loginLimiter, unifiedLogin);
 router.get('/me', authenticate, getMe);
+
+// Unauthenticated logging endpoint for frontend crash tracking during login
+router.post('/client-log', (req, res) => {
+  const { action, module, detail, userEmail } = req.body;
+  if (!action) return res.status(422).json({ error: 'action required' });
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
+  // Fire and forget
+  const safeEmail = userEmail ? String(userEmail) : 'Unknown Client';
+  logActivity({ name: safeEmail, role: 'user' }, action, module || 'app', detail || {}, ip, 'info');
+  res.json({ ok: true });
+});
 
 router.post('/signup',
   signupLimiter,
