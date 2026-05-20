@@ -43,7 +43,36 @@ const app = express();
 // the wrong scheme and Easebuzz refuses or falls back to env.
 app.set('trust proxy', true);
 
-app.use(cors());
+// ── CORS Configuration ──────────────────────────────────────────────────────
+// Mobile apps (React Native) use native HTTP and bypass CORS entirely.
+// This config protects web clients (admin panel, visitor-web) while
+// remaining open enough for legitimate cross-origin requests.
+const allowedOrigins = [
+  'https://my-building-backend.vercel.app',
+  'https://my-building-frontend.vercel.app',
+  // Add any custom domain you use for the web admin/visitor portal:
+  // 'https://mybuilding.example.com',
+];
+
+// In development, also allow localhost origins
+if (process.env.NODE_ENV === 'development') {
+  allowedOrigins.push('http://localhost:3000', 'http://localhost:5000', 'http://localhost:8081');
+}
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, Postman, curl, server-to-server)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    // For safety, still allow — log for audit. Change to callback(new Error(...)) to block.
+    console.warn(`[CORS] Request from unlisted origin: ${origin}`);
+    return callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 

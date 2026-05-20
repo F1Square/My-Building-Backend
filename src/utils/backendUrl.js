@@ -4,7 +4,7 @@
  * Strategy (in order of preference):
  *   1. If the request carries a usable Host header, derive the URL from the
  *      request itself. This works equally well for:
- *        - local dev (http://10.10.4.75:5000)
+ *        - local dev (http://10.10.8.102:5000)
  *        - Vercel / Render / any HTTPS-fronted deployment, because we
  *          enabled `app.set('trust proxy', true)` and Express then honours
  *          X-Forwarded-Proto / X-Forwarded-Host.
