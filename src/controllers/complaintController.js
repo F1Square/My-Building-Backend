@@ -80,7 +80,7 @@ exports.getMyComplaints = async (req, res) => {
   const { status } = req.query;
   let query = supabase
     .from('complaints')
-    .select('*')
+    .select('id, user_id, building_id, title, description, category, status, remark, created_at, updated_at')
     .eq('user_id', req.user.id)
     .order('created_at', { ascending: false });
 
@@ -99,7 +99,7 @@ exports.getBuildingComplaints = async (req, res) => {
 
   let query = supabase
     .from('complaints')
-    .select('*, users(name, flat_no, wing)')
+    .select('id, user_id, building_id, title, description, category, status, remark, created_at, updated_at, users(name, flat_no, wing)')
     .eq('building_id', building_id)
     .order('created_at', { ascending: false });
 
@@ -108,6 +108,37 @@ exports.getBuildingComplaints = async (req, res) => {
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);
+};
+
+// Get a single complaint by id (detail view — avoids passing large payloads via navigation)
+exports.getComplaintById = async (req, res) => {
+  const { id } = req.params;
+
+  const { data, error } = await supabase
+    .from('complaints')
+    .select('*, users(name, flat_no, wing), buildings(name)')
+    .eq('id', id)
+    .single();
+
+  if (error || !data) return res.status(404).json({ error: 'Complaint not found' });
+
+  const { role, id: userId, building_id } = req.user;
+
+  if (role === 'admin') return res.json(data);
+
+  if (role === 'pramukh') {
+    if (data.building_id !== building_id) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    return res.json(data);
+  }
+
+  // user: own complaint or any complaint in their building (society view)
+  if (data.user_id === userId || data.building_id === building_id) {
+    return res.json(data);
+  }
+
+  return res.status(403).json({ error: 'Access denied' });
 };
 
 // Pramukh: update status + remark
@@ -140,7 +171,7 @@ exports.adminGetComplaints = async (req, res) => {
 
   let query = supabase
     .from('complaints')
-    .select('*, users(name, flat_no, wing), buildings(name)')
+    .select('id, user_id, building_id, title, description, category, status, remark, created_at, updated_at, users(name, flat_no, wing), buildings(name)')
     .order('created_at', { ascending: false });
 
   if (building_id) query = query.eq('building_id', building_id);

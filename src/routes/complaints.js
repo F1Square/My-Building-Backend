@@ -21,13 +21,16 @@ router.get('/my', authenticate, requireRole('user', 'pramukh'), c.getMyComplaint
 // User + Pramukh: all complaints for their building (society view)
 router.get('/building', authenticate, requireRole('user', 'pramukh'), c.getBuildingComplaints);
 
-// Pramukh: update status + remark
-router.patch('/:id/status', authenticate, requireRole('pramukh', 'admin'), c.updateComplaintStatus);
-
-// Admin routes
+// Admin routes (must be before /:id)
 router.get('/admin', authenticate, requireRole('admin'), c.adminGetComplaints);
 router.post('/admin', authenticate, requireRole('admin'), c.adminCreateComplaint);
 router.put('/admin/:id', authenticate, requireRole('admin'), c.adminUpdateComplaint);
 router.delete('/admin/:id', authenticate, requireRole('admin'), c.adminDeleteComplaint);
+
+// Pramukh: update status + remark
+router.patch('/:id/status', authenticate, requireRole('pramukh', 'admin'), c.updateComplaintStatus);
+
+// Single complaint detail (must be last — :id would otherwise capture "admin", "my", etc.)
+router.get('/:id', authenticate, requireRole('user', 'pramukh', 'admin'), c.getComplaintById);
 
 module.exports = router;
