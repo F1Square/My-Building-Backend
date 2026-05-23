@@ -1,6 +1,6 @@
 const supabase = require('../supabase');
 const crypto = require('crypto');
-const { getBackendUrl } = require('../utils/backendUrl');
+const { getPaymentCallbackUrl } = require('../utils/backendUrl');
 const {
   getPlanForPayment,
   getPlanRupeeBase,
@@ -196,7 +196,7 @@ exports.createOrder = async (req, res) => {
     const merchantTransactionId = `S${req.user.id.replace(/-/g, '').substring(0, 10)}${Date.now()}`.substring(0, 25);
     // Always derive backend URL from the actual request — works in dev (local IP)
     // AND in prod (Vercel) since `trust proxy` is enabled in index.js.
-    const backendUrl = getBackendUrl(req);
+    const backendUrl = getPaymentCallbackUrl(req);
     if (!backendUrl) return res.status(500).json({ error: 'Cannot resolve backend URL from request' });
 
     const redirectUrl = `${backendUrl}/api/subscriptions/easebuzz-callback?type=subscription&plan=${plan}&user_id=${req.user.id}&promo_id=${promo_id || ''}&include_newspaper=${include_newspaper ? '1' : '0'}&txn_id=${merchantTransactionId}`;
@@ -335,91 +335,98 @@ exports.requireSubscription = async (req, res, next) => {
 
 // Callback from Easebuzz for subscription/newspaper add-on
 exports.easebuzzCallback = async (req, res) => {
-  const { type, plan, user_id: queryUserId, promo_id, include_newspaper, txn_id } = req.query;
-  // Easebuzz POSTs form-encoded data; some test redirects come via GET so we
-  // accept either body or query string as the gateway payload.
-  const gatewayPayload = req.body && Object.keys(req.body).length ? req.body : req.query;
+  const { type, plan: queryPlan, user_id: queryUserId, promo_id, include_newspaper, txn_id } = req.query;
+  const {
+    mergeGatewayPayload,
+    resolvePaymentOutcome,
+    redirectToApp,
+  } = require('../utils/easebuzzHelper');
+  const gatewayPayload = mergeGatewayPayload(req);
 
-  // user_id may come from query param OR from Easebuzz udf1 (set at order creation time)
   const user_id = queryUserId || gatewayPayload?.udf1 || null;
+  const plan = queryPlan || gatewayPayload?.udf2 || null;
 
   try {
-    const { verifyResponseHash } = require('../utils/easebuzzHelper');
-    const status = String(gatewayPayload?.status || '').toLowerCase();
-    const paymentId = gatewayPayload?.easepayid || gatewayPayload?.payment_id || txn_id;
-    const hashOk = gatewayPayload?.hash ? verifyResponseHash(gatewayPayload) : true;
+    const outcome = await resolvePaymentOutcome(gatewayPayload, txn_id);
 
-    if (status === 'success' && hashOk) {
-
-      if (type === 'newspaper_addon') {
-        if (!user_id) {
-          console.error('[Easebuzz callback] newspaper_addon: user_id missing from query and udf1');
-          return res.redirect(`mybuilding://subscription?status=failed`);
-        }
-        await supabase
-          .from('subscriptions')
-          .update({ newspaper_addon: true })
-          .eq('user_id', user_id);
-
-        return res.redirect(`mybuilding://subscription?status=success`);
-      } else {
-        // Subscription activation
-        const now = new Date();
-        const planCfg = await getPlanForPayment(plan);
-        const months = planCfg?.months;
-        const expires_at = months == null ? null
-          : new Date(now.getFullYear(), now.getMonth() + months, now.getDate()).toISOString();
-
-        const { data: existing } = await supabase
-          .from('subscriptions').select('id').eq('user_id', user_id).single();
-
-        const subscriptionRow = {
-          user_id,
-          plan,
-          status: 'active',
-          started_at: now.toISOString(),
-          expires_at,
-          razorpay_payment_id: paymentId,
-          razorpay_order_id: txn_id,
-        };
-
-        if (existing) {
-          await supabase.from('subscriptions').update(subscriptionRow).eq('user_id', user_id);
-        } else {
-          await supabase.from('subscriptions').insert(subscriptionRow);
-        }
-
-        // Activate newspaper add-on if included
-        if (include_newspaper === '1') {
-          await supabase.from('subscriptions').update({ newspaper_addon: true }).eq('user_id', user_id);
-        }
-
-        // Record paid amount + promo usage. Easebuzz returns "amount" in rupees as a string.
-        const paidAmountRupees = Math.round(Number(gatewayPayload?.amount || 0));
-        const fallbackRupee = await getPlanRupeeBase(plan);
-        if (promo_id) {
-          const { markPromoUsed } = require('./promoController');
-          await markPromoUsed(promo_id, user_id);
-          const { data: promo } = await supabase.from('promo_codes').select('code').eq('id', promo_id).single();
-          await supabase.from('subscriptions').update({
-            paid_amount: paidAmountRupees || null,
-            promo_code_used: promo?.code || null,
-          }).eq('user_id', user_id);
-        } else {
-          await supabase.from('subscriptions').update({
-            paid_amount: paidAmountRupees || fallbackRupee || null,
-            promo_code_used: null,
-          }).eq('user_id', user_id);
-        }
-
-        return res.redirect(`mybuilding://subscription?status=success`);
-      }
-    } else {
-      return res.redirect(`mybuilding://subscription?status=failed`);
+    if (!outcome.ok) {
+      console.warn('[Easebuzz subscription callback] payment not completed', {
+        status: outcome.status,
+        reason: outcome.reason,
+        txn_id,
+        hashOk: outcome.hashOk,
+        easepayid: gatewayPayload?.easepayid || null,
+      });
+      const reasonParam = encodeURIComponent(String(outcome.reason || '').slice(0, 120));
+      return redirectToApp(res, `mybuilding://subscribe?status=failed&reason=${reasonParam}`);
     }
+
+    const paymentId = gatewayPayload?.easepayid || gatewayPayload?.payment_id || gatewayPayload?.txnid || txn_id;
+
+    if (type === 'newspaper_addon') {
+      if (!user_id) {
+        console.error('[Easebuzz callback] newspaper_addon: user_id missing from query and udf1');
+        return redirectToApp(res, 'mybuilding://subscribe?status=failed');
+      }
+      await supabase
+        .from('subscriptions')
+        .update({ newspaper_addon: true })
+        .eq('user_id', user_id);
+
+      return redirectToApp(res, 'mybuilding://subscribe?status=success');
+    }
+
+    // Subscription activation
+    const now = new Date();
+    const planCfg = await getPlanForPayment(plan);
+    const months = planCfg?.months;
+    const expires_at = months == null ? null
+      : new Date(now.getFullYear(), now.getMonth() + months, now.getDate()).toISOString();
+
+    const { data: existing } = await supabase
+      .from('subscriptions').select('id').eq('user_id', user_id).single();
+
+    const subscriptionRow = {
+      user_id,
+      plan,
+      status: 'active',
+      started_at: now.toISOString(),
+      expires_at,
+      razorpay_payment_id: paymentId,
+      razorpay_order_id: gatewayPayload?.txnid || txn_id,
+    };
+
+    if (existing) {
+      await supabase.from('subscriptions').update(subscriptionRow).eq('user_id', user_id);
+    } else {
+      await supabase.from('subscriptions').insert(subscriptionRow);
+    }
+
+    if (include_newspaper === '1') {
+      await supabase.from('subscriptions').update({ newspaper_addon: true }).eq('user_id', user_id);
+    }
+
+    const paidAmountRupees = Math.round(Number(gatewayPayload?.amount || 0));
+    const fallbackRupee = await getPlanRupeeBase(plan);
+    if (promo_id) {
+      const { markPromoUsed } = require('./promoController');
+      await markPromoUsed(promo_id, user_id);
+      const { data: promo } = await supabase.from('promo_codes').select('code').eq('id', promo_id).single();
+      await supabase.from('subscriptions').update({
+        paid_amount: paidAmountRupees || null,
+        promo_code_used: promo?.code || null,
+      }).eq('user_id', user_id);
+    } else {
+      await supabase.from('subscriptions').update({
+        paid_amount: paidAmountRupees || fallbackRupee || null,
+        promo_code_used: null,
+      }).eq('user_id', user_id);
+    }
+
+    return redirectToApp(res, 'mybuilding://subscribe?status=success');
   } catch (err) {
     console.error("Easebuzz callback error:", err);
-    return res.redirect(`mybuilding://subscription?status=failed`);
+    return redirectToApp(res, 'mybuilding://subscribe?status=failed');
   }
 };
 // Backward compatibility for existing route wiring
@@ -466,7 +473,7 @@ exports.createNewspaperAddonOrder = async (req, res) => {
     const { initiatePayment } = require('../utils/easebuzzHelper');
     // Easebuzz requires txnid to be alphanumeric only, max 25 chars.
     const merchantTransactionId = `N${req.user.id.replace(/-/g, '').substring(0, 10)}${Date.now()}`.substring(0, 25);
-    const backendUrl = getBackendUrl(req);
+    const backendUrl = getPaymentCallbackUrl(req);
     if (!backendUrl) return res.status(500).json({ error: 'Cannot resolve backend URL from request' });
 
     // Keep surl short — Easebuzz validates URL length. type + txn_id are enough; user_id is in udf1.
