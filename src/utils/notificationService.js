@@ -1,19 +1,56 @@
 const supabase = require('../supabase');
-const { Expo } = require('expo-server-sdk');
 
-const expo = new Expo();
+let expoSdkPromise = null;
+
+async function getExpoSdk() {
+  if (!expoSdkPromise) {
+    expoSdkPromise = import('expo-server-sdk')
+      .then((mod) => {
+        const Expo = mod.Expo || mod.default?.Expo;
+        if (!Expo) {
+          throw new Error('Failed to load Expo class from expo-server-sdk');
+        }
+        return { Expo, expo: new Expo() };
+      })
+      .catch((error) => {
+        expoSdkPromise = null;
+        throw error;
+      });
+  }
+  return expoSdkPromise;
+}
+
+async function filterValidExpoMessages(recipients, mapMessage) {
+  const recipientsWithToken = (recipients || []).filter((r) => r?.expo_push_token);
+  if (!recipientsWithToken.length) return [];
+
+  try {
+    const { Expo } = await getExpoSdk();
+    return recipientsWithToken
+      .filter((r) => Expo.isExpoPushToken(r.expo_push_token))
+      .map((r) => mapMessage(r.expo_push_token));
+  } catch (error) {
+    console.error('Error validating Expo push tokens:', error);
+    return [];
+  }
+}
 
 // Helper to send push notifications via Expo
 async function sendPushNotifications(messages) {
-  const chunks = expo.chunkPushNotifications(messages);
-  const tickets = [];
-  for (const chunk of chunks) {
-    try {
-      const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-      tickets.push(...ticketChunk);
-    } catch (error) {
-      console.error('Error sending push notification chunk:', error);
+  if (!messages?.length) return;
+
+  try {
+    const { expo } = await getExpoSdk();
+    const chunks = expo.chunkPushNotifications(messages);
+    for (const chunk of chunks) {
+      try {
+        await expo.sendPushNotificationsAsync(chunk);
+      } catch (error) {
+        console.error('Error sending push notification chunk:', error);
+      }
     }
+  } catch (error) {
+    console.error('Error initializing Expo SDK:', error);
   }
 }
 
@@ -24,14 +61,15 @@ exports.notifyUser = async (user_id, { title, body, type, meta = {} }) => {
 
   // 2. Send Push
   const { data: user } = await supabase.from('users').select('expo_push_token').eq('id', user_id).single();
-  if (user?.expo_push_token && Expo.isExpoPushToken(user.expo_push_token)) {
-    await sendPushNotifications([{
-      to: user.expo_push_token,
+  if (user?.expo_push_token) {
+    const messages = await filterValidExpoMessages([user], (token) => ({
+      to: token,
       sound: 'default',
       title,
       body,
       data: { type, ...meta },
-    }]);
+    }));
+    await sendPushNotifications(messages);
   }
 };
 
@@ -52,15 +90,13 @@ exports.notifyMembers = async (building_id, { title, body, type, meta = {} }, sp
   );
 
   // 2. Send Push
-  const messages = members
-    .filter(m => m.expo_push_token && Expo.isExpoPushToken(m.expo_push_token))
-    .map(m => ({
-      to: m.expo_push_token,
-      sound: 'default',
-      title,
-      body,
-      data: { type, ...meta },
-    }));
+  const messages = await filterValidExpoMessages(members, (token) => ({
+    to: token,
+    sound: 'default',
+    title,
+    body,
+    data: { type, ...meta },
+  }));
 
   if (messages.length > 0) {
     await sendPushNotifications(messages);
@@ -84,15 +120,13 @@ exports.notifyPramukh = async (building_id, { title, body, type, meta = {} }) =>
   );
 
   // 2. Send Push
-  const messages = pramukhs
-    .filter(p => p.expo_push_token && Expo.isExpoPushToken(p.expo_push_token))
-    .map(p => ({
-      to: p.expo_push_token,
-      sound: 'default',
-      title,
-      body,
-      data: { type, ...meta },
-    }));
+  const messages = await filterValidExpoMessages(pramukhs, (token) => ({
+    to: token,
+    sound: 'default',
+    title,
+    body,
+    data: { type, ...meta },
+  }));
 
   if (messages.length > 0) {
     await sendPushNotifications(messages);
@@ -116,15 +150,13 @@ exports.notifyMembersExcept = async (building_id, exclude_user_id, { title, body
   );
 
   // 2. Send Push
-  const messages = members
-    .filter(m => m.expo_push_token && Expo.isExpoPushToken(m.expo_push_token))
-    .map(m => ({
-      to: m.expo_push_token,
-      sound: 'default',
-      title,
-      body,
-      data: { type, ...meta },
-    }));
+  const messages = await filterValidExpoMessages(members, (token) => ({
+    to: token,
+    sound: 'default',
+    title,
+    body,
+    data: { type, ...meta },
+  }));
 
   if (messages.length > 0) {
     await sendPushNotifications(messages);
