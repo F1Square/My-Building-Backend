@@ -744,6 +744,21 @@ exports.createPaymentOrder = async (req, res) => {
   }
 };
 
+async function maintenancePaymentReturnUrl(status, recordId) {
+  let category = 'maintenance';
+  if (recordId) {
+    const { data } = await supabase
+      .from('maintenance_payments')
+      .select('maintenance_bills(category)')
+      .eq('id', recordId)
+      .maybeSingle();
+    if (data?.maintenance_bills?.category) category = data.maintenance_bills.category;
+  }
+  const q = new URLSearchParams({ status, category });
+  if (recordId) q.set('record_id', recordId);
+  return `mybuilding://maintenance-category?${q.toString()}`;
+}
+
 // Easebuzz Redirect Callback — gateway redirects the user here
 exports.easebuzzCallback = async (req, res) => {
   const { record_id, txn_id } = req.query;
@@ -803,10 +818,7 @@ exports.easebuzzCallback = async (req, res) => {
         })();
       }
 
-      return redirectToApp(
-        res,
-        `mybuilding://my-payments?status=success&record_id=${encodeURIComponent(record_id)}`,
-      );
+      return redirectToApp(res, await maintenancePaymentReturnUrl('success', record_id));
     } else {
       // Payment failed or hash mismatch
       const { data: rec } = await supabase
@@ -823,15 +835,11 @@ exports.easebuzzCallback = async (req, res) => {
           { record_id, reason: status || 'verification_failed', amount: rec.amount, period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}` }
         );
       }
-      return redirectToApp(
-        res,
-        `mybuilding://my-payments?status=failed&record_id=${encodeURIComponent(record_id)}`,
-      );
+      return redirectToApp(res, await maintenancePaymentReturnUrl('failed', record_id));
     }
   } catch (err) {
     console.error("Easebuzz callback processing error:", err);
-    const rid = encodeURIComponent(record_id || '');
-    return redirectToApp(res, `mybuilding://my-payments?status=failed&record_id=${rid}`);
+    return redirectToApp(res, await maintenancePaymentReturnUrl('failed', record_id || ''));
   }
 };
 // Backward compatibility for existing route wiring
