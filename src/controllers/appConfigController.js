@@ -1,7 +1,7 @@
 const supabase = require('../supabase');
 
 const DEFAULT_CONFIG = Object.freeze({
-  version: '1.14.1',
+  version: '1.17.3',
   maintenance_mode: false,
   maintenance_message: 'Our services are currently under maintenance.',
 });
