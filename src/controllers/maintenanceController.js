@@ -4,7 +4,7 @@ const ns = require('../utils/notificationService');
 const addMaintenanceExpense = require('../utils/addMaintenanceExpense');
 const settleAdvanceCredit = require('../utils/settleAdvanceCredit');
 const { uploadImage } = require('../utils/imageUploadHelper');
-const { getBackendUrl } = require('../utils/backendUrl');
+const { getPaymentCallbackUrl } = require('../utils/backendUrl');
 const { logActivity } = require('../utils/activityLogger');
 
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
@@ -697,7 +697,7 @@ exports.createPaymentOrder = async (req, res) => {
     // Easebuzz: txnid alphanumeric only, max 25 chars (see easebuzzHelper.sanitizeTxnid).
     const rid = payment_record_id.replace(/-/g, '');
     const merchantTransactionId = `M${rid.slice(0, 10)}${Date.now()}`.slice(0, 25);
-    const backendUrl = getBackendUrl(req);
+    const backendUrl = getPaymentCallbackUrl(req);
     if (!backendUrl) return res.status(500).json({ error: 'Cannot resolve backend URL from request' });
 
     const bill = record.maintenance_bills;
@@ -747,15 +747,21 @@ exports.createPaymentOrder = async (req, res) => {
 // Easebuzz Redirect Callback — gateway redirects the user here
 exports.easebuzzCallback = async (req, res) => {
   const { record_id, txn_id } = req.query;
-  const payload = req.body && Object.keys(req.body).length ? req.body : req.query;
+  const {
+    verifyResponseHash,
+    mergeGatewayPayload,
+    normalizePaymentStatus,
+    isPaymentSuccess,
+    redirectToApp,
+  } = require('../utils/easebuzzHelper');
+  const payload = mergeGatewayPayload(req);
 
   try {
-    const { verifyResponseHash } = require('../utils/easebuzzHelper');
-    const status = String(payload?.status || '').toLowerCase();
-    const paymentId = payload?.easepayid || payload?.payment_id || txn_id;
+    const status = normalizePaymentStatus(payload);
+    const paymentId = payload?.easepayid || payload?.payment_id || payload?.txnid || txn_id;
     const hashOk = payload?.hash ? verifyResponseHash(payload) : true;
 
-    if (status === 'success' && hashOk) {
+    if (isPaymentSuccess(status) && hashOk) {
 
       const { error } = await supabase.from('maintenance_payments').update({
         status: 'paid',
@@ -797,8 +803,9 @@ exports.easebuzzCallback = async (req, res) => {
         })();
       }
 
-      return res.redirect(
-        `mybuilding://payment?status=success&record_id=${encodeURIComponent(record_id)}`,
+      return redirectToApp(
+        res,
+        `mybuilding://my-payments?status=success&record_id=${encodeURIComponent(record_id)}`,
       );
     } else {
       // Payment failed or hash mismatch
@@ -816,14 +823,15 @@ exports.easebuzzCallback = async (req, res) => {
           { record_id, reason: status || 'verification_failed', amount: rec.amount, period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}` }
         );
       }
-      return res.redirect(
-        `mybuilding://payment?status=failed&record_id=${encodeURIComponent(record_id)}`,
+      return redirectToApp(
+        res,
+        `mybuilding://my-payments?status=failed&record_id=${encodeURIComponent(record_id)}`,
       );
     }
   } catch (err) {
     console.error("Easebuzz callback processing error:", err);
     const rid = encodeURIComponent(record_id || '');
-    return res.redirect(`mybuilding://payment?status=failed&record_id=${rid}`);
+    return redirectToApp(res, `mybuilding://my-payments?status=failed&record_id=${rid}`);
   }
 };
 // Backward compatibility for existing route wiring

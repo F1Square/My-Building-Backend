@@ -1,6 +1,6 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
-const { getBackendUrl } = require('../utils/backendUrl');
+const { getPaymentCallbackUrl } = require('../utils/backendUrl');
 
 // GET /maintenance/advance/status
 // Returns credit_balance, months_covered, monthly_amount, ledger for current user
@@ -97,7 +97,7 @@ exports.createAdvanceOrder = async (req, res) => {
     const { initiatePayment } = require('../utils/easebuzzHelper');
     const oid = orderRow.id.replace(/-/g, '');
     const merchantTransactionId = `A${oid.slice(0, 10)}${Date.now()}`.slice(0, 25);
-    const backendUrl = getBackendUrl(req);
+    const backendUrl = getPaymentCallbackUrl(req);
     if (!backendUrl) return res.status(500).json({ error: 'Cannot resolve backend URL from request' });
 
     // Update order with the generated transaction ID
@@ -140,15 +140,21 @@ exports.createAdvanceOrder = async (req, res) => {
 // Easebuzz Callback
 exports.easebuzzCallback = async (req, res) => {
   const { order_row_id, txn_id } = req.query;
-  const payload = req.body && Object.keys(req.body).length ? req.body : req.query;
+  const {
+    verifyResponseHash,
+    mergeGatewayPayload,
+    normalizePaymentStatus,
+    isPaymentSuccess,
+    redirectToApp,
+  } = require('../utils/easebuzzHelper');
+  const payload = mergeGatewayPayload(req);
 
   try {
-    const { verifyResponseHash } = require('../utils/easebuzzHelper');
-    const status = String(payload?.status || '').toLowerCase();
+    const status = normalizePaymentStatus(payload);
     const hashOk = payload?.hash ? verifyResponseHash(payload) : true;
-    const gatewayPaymentId = payload?.easepayid || payload?.payment_id || txn_id;
+    const gatewayPaymentId = payload?.easepayid || payload?.payment_id || payload?.txnid || txn_id;
 
-    if (status === 'success' && hashOk) {
+    if (isPaymentSuccess(status) && hashOk) {
 
   // Fetch the order row
   const { data: orderRow, error: fetchErr } = await supabase
@@ -158,12 +164,12 @@ exports.easebuzzCallback = async (req, res) => {
     .single();
 
   if (fetchErr || !orderRow) {
-    return res.json({ success: false, error: 'Order not found' });
+    return redirectToApp(res, 'mybuilding://advance-payment?status=failed');
   }
 
   // Idempotency: already paid — return success without re-crediting
   if (orderRow.status === 'paid') {
-    return res.json({ success: true });
+    return redirectToApp(res, 'mybuilding://advance-payment?status=success');
   }
 
   const { user_id, building_id, total_amount } = orderRow;
@@ -240,13 +246,13 @@ exports.easebuzzCallback = async (req, res) => {
     console.error('[easebuzzCallback] Post-credit settlement error:', err.message);
   }
 
-  return res.redirect(`mybuilding://advance-payment?status=success`);
+  return redirectToApp(res, 'mybuilding://advance-payment?status=success');
     } else {
-      return res.redirect(`mybuilding://advance-payment?status=failed`);
+      return redirectToApp(res, 'mybuilding://advance-payment?status=failed');
     }
   } catch (err) {
     console.error("Easebuzz callback error:", err);
-    return res.redirect(`mybuilding://advance-payment?status=failed`);
+    return redirectToApp(res, 'mybuilding://advance-payment?status=failed');
   }
 };
 // Backward compatibility for existing route wiring
