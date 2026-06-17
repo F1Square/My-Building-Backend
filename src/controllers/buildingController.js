@@ -388,14 +388,21 @@ exports.adminCreateUser = async (req, res) => {
 };
 
 // User/Pramukh: get own building info
+// Admin: can pass building_id as query param
 exports.getMyBuilding = async (req, res) => {
-  const building_id = req.user.building_id;
+  // Admin can query any building via building_id param
+  const building_id = req.user.role === 'admin' && req.query.building_id 
+    ? req.query.building_id 
+    : req.user.building_id;
+    
   if (!building_id) return res.status(404).json({ error: 'No building associated' });
+  
   const { data, error } = await supabase
     .from('buildings')
     .select('id, name, address, society_logo, payment_method, payment_tc, has_wings, wings, late_fees_enabled, late_fees_amount, water_reading_enabled, created_at')
     .eq('id', building_id)
     .single();
+    
   if (error || !data) return res.status(404).json({ error: 'Building not found' });
   res.json(data);
 };

@@ -54,9 +54,19 @@ router.post('/reset-password', resetPassword);
 router.post('/push-token', authenticate, async (req, res) => {
   const { expo_push_token } = req.body;
   if (!expo_push_token) return res.status(422).json({ error: 'expo_push_token is required' });
-  const supabase = require('../supabase');
-  await supabase.from('users').update({ expo_push_token }).eq('id', req.user.id);
+  
+  // Respond immediately to avoid blocking the client
   res.json({ message: 'Push token saved' });
+  
+  // Update database in background (fire-and-forget)
+  const supabase = require('../supabase');
+  supabase.from('users').update({ expo_push_token }).eq('id', req.user.id)
+    .then(() => {
+      console.log(`[push-token] Token saved for user ${req.user.id}`);
+    })
+    .catch((err) => {
+      console.error(`[push-token] Failed to save token for user ${req.user.id}:`, err);
+    });
 });
 
 // Update own profile details
