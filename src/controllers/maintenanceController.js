@@ -2,7 +2,6 @@ const supabase = require('../supabase');
 const PDFDocument = require('pdfkit');
 const ns = require('../utils/notificationService');
 const addMaintenanceExpense = require('../utils/addMaintenanceExpense');
-const settleAdvanceCredit = require('../utils/settleAdvanceCredit');
 const { uploadImage } = require('../utils/imageUploadHelper');
 const { getPaymentCallbackUrl } = require('../utils/backendUrl');
 const { logActivity } = require('../utils/activityLogger');
@@ -91,7 +90,6 @@ exports.addBill = async (req, res) => {
         body: `New bill of ₹${parsedAmount} for ${MONTHS[billMonth]} ${billYear}. Due: ${due_date}${parsedPenalty > 0 ? `. Penalty: ₹${parsedPenalty} after due date` : ''}`,
         type: 'bill', meta: { bill_id: bill.id },
       });
-      await settleAdvanceCredit(building_id, members, { id: bill.id, amount: parsedAmount });
     }
     return res.status(201).json({ message: 'Bill added', bill });
   }
