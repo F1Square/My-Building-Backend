@@ -3,7 +3,14 @@ const supabase = require('../supabase');
 // ── Get all wings for a building ──────────────────────────────────────────────
 exports.getWings = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
-  if (!building_id) return res.status(400).json({ error: 'building_id required' });
+  
+  // Admin without building_id: return empty array (they need to select a building first)
+  if (!building_id) {
+    if (req.user.role === 'admin') {
+      return res.json([]);
+    }
+    return res.status(400).json({ error: 'building_id required' });
+  }
 
   try {
     const { data: building } = await supabase
@@ -49,7 +56,13 @@ async function adjustBalance(building_id, wing = 'Building-Wide', delta) {
 exports.getFundSummary = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
   const wing = req.query.wing || 'Building-Wide';
-  if (!building_id) return res.status(400).json({ error: 'building_id required' });
+  
+  if (!building_id) {
+    if (req.user.role === 'admin') {
+      return res.status(400).json({ error: 'Admin must specify building_id in query parameters' });
+    }
+    return res.status(400).json({ error: 'building_id required' });
+  }
 
   const { data } = await supabase
     .from('society_funds')
@@ -65,7 +78,13 @@ exports.getFundSummary = async (req, res) => {
 exports.setOpeningBalance = async (req, res) => {
   const { amount, building_id: bodyBuildingId, wing = 'Building-Wide' } = req.body;
   const building_id = req.user.building_id || bodyBuildingId;
-  if (!building_id) return res.status(400).json({ error: 'building_id required' });
+  
+  if (!building_id) {
+    if (req.user.role === 'admin') {
+      return res.status(400).json({ error: 'Admin must specify building_id in request body' });
+    }
+    return res.status(400).json({ error: 'building_id required' });
+  }
 
   const parsed = parseFloat(amount);
   if (isNaN(parsed) || parsed < 0) return res.status(422).json({ error: 'Amount must be a valid non-negative number' });
@@ -109,7 +128,13 @@ exports.setOpeningBalance = async (req, res) => {
 exports.getEntries = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
   const wing = req.query.wing || 'Building-Wide';
-  if (!building_id) return res.status(400).json({ error: 'building_id required' });
+  
+  if (!building_id) {
+    if (req.user.role === 'admin') {
+      return res.status(400).json({ error: 'Admin must specify building_id in query parameters' });
+    }
+    return res.status(400).json({ error: 'building_id required' });
+  }
 
   const { type, limit = 100 } = req.query;
 
@@ -133,7 +158,13 @@ exports.getEntries = async (req, res) => {
 exports.addEntry = async (req, res) => {
   const { type, amount, description, category, date, building_id: bodyBuildingId, wing = 'Building-Wide' } = req.body;
   const building_id = req.user.building_id || bodyBuildingId;
-  if (!building_id) return res.status(400).json({ error: 'building_id required' });
+  
+  if (!building_id) {
+    if (req.user.role === 'admin') {
+      return res.status(400).json({ error: 'Admin must specify building_id in request body' });
+    }
+    return res.status(400).json({ error: 'building_id required' });
+  }
 
   if (!VALID_TYPES.includes(type)) return res.status(422).json({ error: 'type must be inflow or outflow' });
   const parsed = parseFloat(amount);

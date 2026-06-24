@@ -20,6 +20,7 @@ router.get('/phonepe-callback', c.easebuzzCallback);  // Backward compatibility
 // Admin
 router.get('/all', authenticate, requireRole('admin'), c.adminGetAll);
 router.post('/grant', authenticate, requireRole('admin'), c.adminGrant);
+router.post('/grant-newspaper', authenticate, requireRole('admin'), c.adminGrantNewspaper);
 router.post('/revoke', authenticate, requireRole('admin'), c.adminRevoke);
 
 // Newspaper add-on toggle (existing subscribers)
