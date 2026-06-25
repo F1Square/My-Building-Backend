@@ -4,6 +4,7 @@ const ns = require('../utils/notificationService');
 const PHONE_RE = /^[6-9]\d{9}$/;
 
 // PUBLIC: visitor self-entry via QR (no auth required)
+// ENHANCED: Notify only specific flat owner, not broadcast to all
 exports.visitorSelfEntry = async (req, res) => {
   const { building_id } = req.params;
   const { name, mobile, purpose, flat_no, photo_url } = req.body;
@@ -20,29 +21,70 @@ exports.visitorSelfEntry = async (req, res) => {
     .from('buildings').select('id, name').eq('id', building_id).single();
   if (!building) return res.status(404).json({ error: 'Building not found' });
 
-  const { data, error } = await supabase
-    .from('visitors')
-    .insert({
-      building_id,
-      name: name.trim(),
-      phone: mobile.trim(),
-      purpose: purpose?.trim(),
-      flat_no: flat_no.trim(),
-      photo_url,
-      entry_type: 'self'
-    })
-    .select().single();
+  try {
+    // Find home owner (user living in this flat)
+    const { data: homeOwner } = await supabase
+      .from('users')
+      .select('id, name, expo_push_token')
+      .eq('building_id', building_id)
+      .eq('flat_no', flat_no.trim())
+      .eq('status', 'approved')
+      .single();
 
-  if (error) return res.status(400).json({ error: error.message });
+    // Create visitor entry
+    const { data, error } = await supabase
+      .from('visitors')
+      .insert({
+        building_id,
+        name: name.trim(),
+        phone: mobile.trim(),
+        purpose: purpose?.trim(),
+        flat_no: flat_no.trim(),
+        photo_url,
+        entry_type: 'self',
+        via_qr: true,
+        home_user_id: homeOwner?.id || null
+      })
+      .select().single();
 
-  await ns.notifyMembers(building_id, {
-    title: '🚪 New Visitor',
-    body: `${name.trim()} is visiting Flat ${flat_no.trim()} — ${purpose?.trim() || 'No purpose specified'}`,
-    type: 'visitor',
-    meta: { visitor_id: data.id }
-  });
+    if (error) return res.status(400).json({ error: error.message });
 
-  res.status(201).json({ message: 'Entry logged successfully', visitor: data, building_name: building.name });
+    // SMART NOTIFICATION: Notify only the flat owner (not all members)
+    if (homeOwner?.id) {
+      // Notify ONLY this flat owner
+      await ns.notifyUser(homeOwner.id, {
+        title: '🚪 Visitor at Your Door',
+        body: `${name.trim()} is visiting your flat — ${purpose?.trim() || 'No purpose specified'}`,
+        type: 'visitor',
+        meta: { visitor_id: data.id, flat_no: flat_no.trim() }
+      });
+
+      // Log who was notified
+      await supabase
+        .from('visitors')
+        .update({ notified_users: [homeOwner.id] })
+        .eq('id', data.id)
+        .catch(err => console.error('Failed to log notified users:', err));
+    } else {
+      // Fallback: If no flat owner found, notify all pramukhs/admins
+      await ns.notifyPramukh(building_id, {
+        title: '🚪 Visitor Entry - Flat Not Found',
+        body: `${name.trim()} is visiting Flat ${flat_no.trim()} (owner not registered) — ${purpose?.trim() || 'No purpose specified'}`,
+        type: 'visitor',
+        meta: { visitor_id: data.id, flat_no: flat_no.trim() }
+      });
+    }
+
+    res.status(201).json({ 
+      message: 'Entry logged successfully', 
+      visitor: data, 
+      building_name: building.name,
+      notified_flat_owner: !!homeOwner?.id 
+    });
+  } catch (error) {
+    console.error('Visitor self-entry error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
 };
 
 // PUBLIC: JSON building info — used by visitor-web standalone website

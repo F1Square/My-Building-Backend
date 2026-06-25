@@ -2,6 +2,9 @@ const router = require('express').Router();
 const { authenticate, requireRole } = require('../middleware/auth');
 const c = require('../controllers/expenseController');
 
+// Get all wings for a building
+router.get('/wings', authenticate, c.getWings);
+
 // All authenticated users can view
 router.get('/summary', authenticate, c.getFundSummary);
 router.get('/entries', authenticate, c.getEntries);

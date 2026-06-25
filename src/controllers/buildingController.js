@@ -14,17 +14,29 @@ const getBuildingCode = (id = '') => {
   return firstChunk.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
 };
 
+const hasOnlinePayment = (methods) => {
+  const list = Array.isArray(methods) ? methods : String(methods || '').split(',').map((m) => m.trim());
+  return list.some((m) => /online/i.test(m));
+};
+
+const PAYMENT_TC_ACCEPTED = 'accepted';
+
 // Admin: create building only (no pramukh)
 exports.createBuildingOnly = async (req, res) => {
   const {
     name, address,
     has_wings, wings, late_fees_enabled, late_fees_amount,
-    water_reading_enabled, payment_methods
+    water_reading_enabled, payment_methods, terms_accepted
   } = req.body;
 
   if (!name?.trim()) return res.status(400).json({ error: 'Building name is required' });
   if (name.trim().length > 150) return res.status(422).json({ error: 'Building name must not exceed 150 characters' });
   if (address && address.trim().length > 300) return res.status(422).json({ error: 'Address must not exceed 300 characters' });
+
+  const onlineSelected = hasOnlinePayment(payment_methods);
+  if (onlineSelected && !terms_accepted) {
+    return res.status(422).json({ error: 'You must accept the Easebuzz payment terms and conditions to enable online payments' });
+  }
 
   const building_id = uuidv4();
 
@@ -37,12 +49,13 @@ exports.createBuildingOnly = async (req, res) => {
     late_fees_enabled: !!late_fees_enabled,
     late_fees_amount: late_fees_enabled ? Number(late_fees_amount) : null,
     water_reading_enabled: !!water_reading_enabled,
-    payment_method: Array.isArray(payment_methods) ? payment_methods.join(', ') : 'Online'
+    payment_method: Array.isArray(payment_methods) ? payment_methods.join(', ') : 'Online',
+    payment_tc: onlineSelected && terms_accepted ? PAYMENT_TC_ACCEPTED : null,
   };
 
   const { error } = await supabase.from('buildings').insert(payload);
   if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json({ message: 'Building created', building_id });
+  res.status(201).json({ message: 'Building created', building_id, payment_tc: payload.payment_tc });
 };
 
 // Admin: create pramukh for an existing building
@@ -388,14 +401,21 @@ exports.adminCreateUser = async (req, res) => {
 };
 
 // User/Pramukh: get own building info
+// Admin: can pass building_id as query param
 exports.getMyBuilding = async (req, res) => {
-  const building_id = req.user.building_id;
+  // Admin can query any building via building_id param
+  const building_id = req.user.role === 'admin' && req.query.building_id 
+    ? req.query.building_id 
+    : req.user.building_id;
+    
   if (!building_id) return res.status(404).json({ error: 'No building associated' });
+  
   const { data, error } = await supabase
     .from('buildings')
     .select('id, name, address, society_logo, payment_method, payment_tc, has_wings, wings, late_fees_enabled, late_fees_amount, water_reading_enabled, created_at')
     .eq('id', building_id)
     .single();
+    
   if (error || !data) return res.status(404).json({ error: 'Building not found' });
   res.json(data);
 };
@@ -538,12 +558,13 @@ exports.deleteBuilding = async (req, res) => {
   try {
     console.log(`[Admin] Starting deep delete for building: ${id}`);
 
-    // 1. Get all user IDs for this building to clean up user-linked tables without building_id
+    // 1. Get all user IDs for this building to clean up user-linked tables
     const { data: buildingUsers } = await supabase.from('users').select('id').eq('building_id', id);
     const userIds = buildingUsers?.map(u => u.id) || [];
+    console.log(`[Admin] Found ${userIds.length} users to clean up`);
 
-    // 2. Phase 1: Parallelize deletion of all data that has building_id
-    // This covers ~90% of related records
+    // 2. Phase 1: Delete records directly linked to building_id (parallel execution for performance)
+    console.log('[Admin] Phase 1: Deleting building-scoped records...');
     const buildingScopedDeletes = [
       supabase.from('maintenance_payments').delete().eq('building_id', id),
       supabase.from('maintenance_bills').delete().eq('building_id', id),
@@ -560,50 +581,270 @@ exports.deleteBuilding = async (req, res) => {
       supabase.from('society_rules').delete().eq('building_id', id),
       supabase.from('helpline_numbers').delete().eq('building_id', id),
       supabase.from('building_bank_details').delete().eq('building_id', id),
-      supabase.from('advance_payment_orders').delete().eq('building_id', id),
-      supabase.from('advance_credit_balance').delete().eq('building_id', id),
-      supabase.from('advance_credit_ledger').delete().eq('building_id', id),
       supabase.from('join_requests').delete().eq('building_id', id),
       supabase.from('announcements').delete().eq('building_id', id),
-      supabase.from('building_inquiries').delete().eq('id', id),
-      supabase.from('referrals').delete().eq('inquiry_id', id)
+      supabase.from('qr_photos').delete().eq('building_id', id),
     ];
 
-    const phase1Results = await Promise.all(buildingScopedDeletes);
-    phase1Results.forEach((r, i) => {
-      if (r.error) console.warn(`[Admin] Phase 1 delete #${i} error (non-fatal):`, r.error.message);
-    });
+    await Promise.allSettled(buildingScopedDeletes);
 
-    // 3. Phase 2: Delete user-specific records by user_id.
-    // maintenance_bills and maintenance_payments are already targeted by building_id
-    // above, but we repeat them here keyed on created_by / user_id as a safety net —
-    // Supabase never throws on silent FK errors so Phase 1 may leave orphans.
+    // 3. Phase 2: Delete user-specific records that don't have building_id (parallel execution)
     if (userIds.length > 0) {
-      console.log(`[Admin] Cleaning up user-linked tables for ${userIds.length} users...`);
+      console.log(`[Admin] Phase 2: Deleting user-scoped records for ${userIds.length} users...`);
+      
+      // First, get building_inquiries IDs for this building to clean referrals
+      const { data: inquiries } = await supabase
+        .from('building_inquiries')
+        .select('id')
+        .eq('id', id);
+      const inquiryIds = inquiries?.map(i => i.id) || [id]; // Use building id as inquiry id might be same
+      
       const userScopedDeletes = [
-        supabase.from('maintenance_bills').delete().in('created_by', userIds),
-        supabase.from('maintenance_payments').delete().in('user_id', userIds),
+        inquiryIds.length > 0 ? supabase.from('referrals').delete().in('inquiry_id', inquiryIds) : Promise.resolve({}),
+        supabase.from('referrals').delete().in('referrer_id', userIds),
+        supabase.from('building_inquiries').delete().in('user_id', userIds),
+        // Delete promo codes (both used_by and created_by FKs)
+        supabase.from('promo_codes').delete().in('used_by', userIds),
+        supabase.from('promo_codes').delete().in('created_by', userIds),
+        // Delete QR photos and newspaper updates
+        supabase.from('qr_photos').delete().in('uploaded_by', userIds),
+        supabase.from('newspapers').delete().in('updated_by', userIds),
+        // Delete other user-scoped records
         supabase.from('subscriptions').delete().in('user_id', userIds),
         supabase.from('notifications').delete().in('user_id', userIds),
+        supabase.from('join_requests').delete().in('user_id', userIds),
       ];
-      await Promise.all(userScopedDeletes);
+      
+      await Promise.allSettled(userScopedDeletes);
     }
 
-    // 4. Phase 3: Delete users (Now safe because all references are gone)
+    // 4. Phase 3: Delete building inquiry if exists (by building id)
+    console.log('[Admin] Phase 3: Deleting building inquiry...');
+    await supabase.from('building_inquiries').delete().eq('id', id);
+
+    // 5. Phase 4: Delete users (now safe - all references removed)
+    console.log('[Admin] Phase 4: Deleting users...');
     const { error: uErr } = await supabase.from('users').delete().eq('building_id', id);
     if (uErr) {
-      console.error('Error deleting users:', uErr);
-      throw uErr;
+      console.error('[Admin] Error deleting users:', uErr);
+      return res.status(500).json({ 
+        error: 'Failed to delete users',
+        details: uErr.message,
+        hint: 'Some user records may have external dependencies. Please contact support.'
+      });
     }
 
-    // 5. Final Phase: Delete the building
+    // 6. Final Phase: Delete the building
+    console.log('[Admin] Final phase: Deleting building...');
     const { error: bErr } = await supabase.from('buildings').delete().eq('id', id);
-    if (bErr) throw bErr;
+    if (bErr) {
+      console.error('[Admin] Error deleting building:', bErr);
+      return res.status(500).json({ 
+        error: 'Failed to delete building',
+        details: bErr.message
+      });
+    }
 
     console.log(`[Admin] Successfully deleted building ${id} and all related data.`);
-    res.json({ message: 'Building and all associated data deleted successfully' });
+    res.json({ 
+      message: 'Building and all associated data deleted successfully',
+      deleted_users: userIds.length,
+      building_id: id
+    });
   } catch (error) {
-    console.error('Delete building error:', error);
-    res.status(500).json({ error: 'Failed to delete building: ' + error.message });
+    console.error('[Admin] Delete building error:', error);
+    res.status(500).json({ 
+      error: 'Failed to delete building',
+      details: error.message,
+      code: error.code || 'UNKNOWN'
+    });
   }
+};
+
+// Admin: update building details
+exports.updateBuilding = async (req, res) => {
+  const { id } = req.params;
+  const {
+    name, address, city, state,
+    has_wings, wings, late_fees_enabled, late_fees_amount,
+    water_reading_enabled, payment_methods, society_logo, payment_tc,
+    terms_accepted
+  } = req.body;
+
+  if (!id) return res.status(400).json({ error: 'Building ID is required' });
+  
+  // Check if building exists
+  const { data: existingBuilding, error: fetchError } = await supabase
+    .from('buildings')
+    .select('id, payment_method, payment_tc')
+    .eq('id', id)
+    .single();
+    
+  if (fetchError || !existingBuilding) {
+    return res.status(404).json({ error: 'Building not found' });
+  }
+
+  const onlineSelected = payment_methods !== undefined
+    ? hasOnlinePayment(payment_methods)
+    : hasOnlinePayment(existingBuilding.payment_method);
+
+  const alreadyAccepted = existingBuilding.payment_tc === PAYMENT_TC_ACCEPTED || !!existingBuilding.payment_tc;
+  if (onlineSelected && !alreadyAccepted && !terms_accepted) {
+    return res.status(422).json({ error: 'You must accept the Easebuzz payment terms and conditions to enable online payments' });
+  }
+
+  // Validate input
+  const updatePayload = {};
+  
+  if (name !== undefined) {
+    if (!name?.trim()) return res.status(400).json({ error: 'Building name cannot be empty' });
+    if (name.trim().length > 150) return res.status(422).json({ error: 'Building name must not exceed 150 characters' });
+    updatePayload.name = name.trim();
+  }
+  
+  if (address !== undefined) {
+    if (address && address.trim().length > 300) return res.status(422).json({ error: 'Address must not exceed 300 characters' });
+    updatePayload.address = address?.trim() || null;
+  }
+  
+  if (city !== undefined) updatePayload.city = city?.trim() || null;
+  if (state !== undefined) updatePayload.state = state?.trim() || null;
+  
+  if (has_wings !== undefined) {
+    updatePayload.has_wings = !!has_wings;
+    if (has_wings && wings !== undefined) {
+      updatePayload.wings = wings?.trim() || null;
+    } else if (!has_wings) {
+      updatePayload.wings = null;
+    }
+  }
+  
+  if (late_fees_enabled !== undefined) {
+    updatePayload.late_fees_enabled = !!late_fees_enabled;
+    if (late_fees_enabled && late_fees_amount !== undefined) {
+      updatePayload.late_fees_amount = Number(late_fees_amount);
+    } else if (!late_fees_enabled) {
+      updatePayload.late_fees_amount = null;
+    }
+  }
+  
+  if (water_reading_enabled !== undefined) {
+    updatePayload.water_reading_enabled = !!water_reading_enabled;
+  }
+  
+  if (payment_methods !== undefined) {
+    updatePayload.payment_method = Array.isArray(payment_methods) ? payment_methods.join(', ') : payment_methods || 'Online';
+  }
+  
+  if (society_logo !== undefined) updatePayload.society_logo = society_logo?.trim() || null;
+  if (payment_tc !== undefined) updatePayload.payment_tc = payment_tc?.trim() || null;
+  if (onlineSelected && (terms_accepted || alreadyAccepted) && !updatePayload.payment_tc) {
+    updatePayload.payment_tc = PAYMENT_TC_ACCEPTED;
+  }
+  if (!onlineSelected) updatePayload.payment_tc = null;
+
+  const { error } = await supabase
+    .from('buildings')
+    .update(updatePayload)
+    .eq('id', id);
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Building updated successfully', building_id: id });
+};
+
+// Get payment terms and conditions
+exports.getPaymentTerms = async (req, res) => {
+  const terms = {
+    app_owner: 'M & A Technology',
+    payment_gateway: 'Easebuzz',
+    title: 'Easebuzz Payment Gateway — Terms & Conditions',
+  sections: [
+    {
+      heading: 'App Ownership',
+      body: 'App ownership always belongs to M & A Technology. Any prior developer attribution was added in error; the sole owner of this platform is M & A Technology.',
+    },
+    {
+      heading: 'Payment Collection & Settlement',
+      body: 'We collect maintenance and society payments from residents on behalf of the society. After T+1 business days, funds are credited directly to the society\'s registered bank account. There is no intermediary between the member and the society account — money flows transparently from resident to society.',
+      note: 'Direct T+1 settlement is being rolled out and will be available soon on the development environment.',
+    },
+    {
+      heading: 'Connected Societies',
+      body: 'We are actively onboarding more societies including Prince Heaven, Nilkanth Elegance, and others. The same payment terms apply uniformly across all connected societies.',
+    },
+    {
+      heading: 'Transparency Principle',
+      body: 'All transactions are visible to both the society account administrators and residents through the integrated Expense Tracker module. We also use detection algorithms to improve accuracy, reduce errors, and deliver a better user experience.',
+    },
+    {
+      heading: 'Dispute Resolution Policy',
+      body: 'A common policy is applied across all societies to resolve payment and maintenance disputes fairly and consistently.',
+    },
+    {
+      heading: 'Society & Administrator Verification',
+      body: 'Societies and administrators are verified through a multi-step process. Administrators must provide society registration documents, authorized committee member details, and contact information. Email addresses and mobile numbers are verified via OTP-based authentication. Only approved administrators may manage society data, ensuring residents interact with legitimate representatives.',
+    },
+    {
+      heading: 'Platform Role & Records',
+      body: 'Our platform acts as a communication and record-keeping system, maintaining a transparent history of complaints, requests, notices, and responses. In case of disputes, both residents and society administrators can refer to these records. The platform facilitates communication and escalation to authorized committee members; final dispute resolution remains the responsibility of the society\'s governing body and applicable local regulations.',
+    },
+  ],
+    acceptance_text: 'By enabling online payments, you confirm that you have read, understood, and agree to all terms and conditions listed above.',
+  };
+  
+  res.json(terms);
+};
+
+// Check if payment terms were accepted for a building
+exports.checkTermsAccepted = async (req, res) => {
+  const { building_id } = req.query;
+  
+  if (!building_id) return res.status(400).json({ error: 'Building ID is required' });
+  
+  const { data: building, error } = await supabase
+    .from('buildings')
+    .select('id, payment_tc, payment_method')
+    .eq('id', building_id)
+    .single();
+
+  if (error || !building) return res.status(404).json({ error: 'Building not found' });
+
+  const accepted = !!building.payment_tc;
+  
+  res.json({ 
+    terms_accepted: accepted,
+    building_id,
+    has_online_payment: hasOnlinePayment(building.payment_method),
+    message: accepted ? 'Terms already accepted' : 'Terms not accepted yet',
+  });
+};
+
+// Accept payment terms for an existing building
+exports.acceptPaymentTerms = async (req, res) => {
+  const { building_id, accept } = req.body;
+  
+  if (!building_id) return res.status(400).json({ error: 'Building ID is required' });
+  if (accept !== true) return res.status(400).json({ error: 'Must accept terms to proceed' });
+
+  const { data: building, error: fetchErr } = await supabase
+    .from('buildings')
+    .select('id')
+    .eq('id', building_id)
+    .single();
+  if (fetchErr || !building) return res.status(404).json({ error: 'Building not found' });
+
+  const { error } = await supabase
+    .from('buildings')
+    .update({ payment_tc: PAYMENT_TC_ACCEPTED })
+    .eq('id', building_id);
+
+  if (error) return res.status(400).json({ error: error.message });
+  
+  res.json({ 
+    success: true,
+    message: 'Payment terms accepted successfully',
+    building_id,
+    accepted_at: new Date().toISOString(),
+    app_owner: 'M & A Technology',
+  });
 };

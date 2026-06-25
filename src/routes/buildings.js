@@ -22,6 +22,10 @@ router.post('/admin/users', authenticate, requireRole('admin'), c.adminCreateUse
 router.post('/admin/promote', authenticate, requireRole('admin'), c.adminPromoteToPramukh);
 router.post('/admin/demote', authenticate, requireRole('admin'), c.adminDemoteToUser);
 router.delete('/admin/users/:user_id', authenticate, requireRole('admin'), c.adminDeleteUser);
+router.get('/payment-terms', c.getPaymentTerms);
+router.get('/check-terms', authenticate, requireRole('admin'), c.checkTermsAccepted);
+router.post('/accept-terms', authenticate, requireRole('admin'), c.acceptPaymentTerms);
+router.put('/:id', authenticate, requireRole('admin'), c.updateBuilding);
 router.delete('/:id', authenticate, requireRole('admin'), c.deleteBuilding);
 
 module.exports = router;
