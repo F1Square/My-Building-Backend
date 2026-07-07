@@ -1,4 +1,9 @@
 const supabase = require('../supabase');
+const {
+  validateReferralForInquiry,
+  applyReferralToInquiry,
+  ReferralValidationError,
+} = require('../utils/referralHelper');
 
 const PINCODE_RE = /^\d{6}$/;
 const VALID_SOCIETY_TYPES = ['Apartment Complex', 'Gated Community', 'Township', 'Co-operative Housing', 'Villa Society', 'Other'];
@@ -33,6 +38,17 @@ exports.submitInquiry = async (req, res) => {
     }
   }
 
+  try {
+    await validateReferralForInquiry({
+      referralCode: referral_code,
+      refereeUserId: req.user.id,
+      refereeEmail: req.user.email,
+    });
+  } catch (err) {
+    if (err instanceof ReferralValidationError) return res.status(err.statusCode).json({ error: err.message });
+    throw err;
+  }
+
   const { data, error } = await supabase.from('building_inquiries').insert({
     user_id: req.user.id,
     user_name: req.user.name,
@@ -56,45 +72,20 @@ exports.submitInquiry = async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
 
-  // Handle optional referral code
   if (referral_code?.trim()) {
-    const { data: referrer } = await supabase
-      .from('users')
-      .select('id')
-      .eq('referral_code', referral_code.trim().toUpperCase())
-      .maybeSingle();
-
-    if (!referrer) {
-      return res.status(422).json({ error: 'Invalid referral code' });
-    }
-    if (referrer.id === req.user.id) {
-      return res.status(422).json({ error: 'Self-referral is not permitted' });
-    }
-
-    // If a signup-time referral already exists for this (referrer, referee)
-    // with no inquiry attached, attach the new inquiry/society to it
-    // instead of creating a duplicate row.
-    const { data: existing } = await supabase
-      .from('referrals')
-      .select('id')
-      .eq('referrer_id', referrer.id)
-      .eq('referee_email', req.user.email)
-      .is('inquiry_id', null)
-      .maybeSingle();
-
-    if (existing) {
-      await supabase
-        .from('referrals')
-        .update({ inquiry_id: data.id, society_name: society_name.trim() })
-        .eq('id', existing.id);
-    } else {
-      await supabase.from('referrals').insert({
-        referrer_id: referrer.id,
-        inquiry_id: data.id,
-        referee_name: req.user.name,
-        referee_email: req.user.email,
-        society_name: society_name.trim(),
+    try {
+      await applyReferralToInquiry({
+        referralCode: referral_code,
+        refereeUserId: req.user.id,
+        refereeEmail: req.user.email,
+        refereeName: req.user.name,
+        inquiryId: data.id,
+        societyName: society_name.trim(),
       });
+    } catch (err) {
+      await supabase.from('building_inquiries').delete().eq('id', data.id);
+      if (err instanceof ReferralValidationError) return res.status(err.statusCode).json({ error: err.message });
+      return res.status(400).json({ error: err.message });
     }
   }
 
@@ -109,6 +100,7 @@ exports.submitPublicInquiry = async (req, res) => {
     state, city, pincode, address,
     late_fee, maintenance_fixed, water_bill_separate,
     payment_method, payment_gateway_link, society_logo, payment_tc,
+    referral_code,
   } = req.body;
 
   if (!user_name?.trim()) return res.status(422).json({ error: 'Your name is required' });
@@ -128,10 +120,22 @@ exports.submitPublicInquiry = async (req, res) => {
     }
   }
 
+  const normalizedEmail = user_email.trim().toLowerCase();
+
+  try {
+    await validateReferralForInquiry({
+      referralCode: referral_code,
+      refereeEmail: normalizedEmail,
+    });
+  } catch (err) {
+    if (err instanceof ReferralValidationError) return res.status(err.statusCode).json({ error: err.message });
+    throw err;
+  }
+
   const { data, error } = await supabase.from('building_inquiries').insert({
     user_id: null,
     user_name: user_name.trim(),
-    user_email: user_email.trim().toLowerCase(),
+    user_email: normalizedEmail,
     society_type,
     society_name: society_name.trim(),
     total_wings: total_wings ? Number(total_wings) : null,
@@ -150,6 +154,23 @@ exports.submitPublicInquiry = async (req, res) => {
   }).select().single();
 
   if (error) return res.status(400).json({ error: error.message });
+
+  if (referral_code?.trim()) {
+    try {
+      await applyReferralToInquiry({
+        referralCode: referral_code,
+        refereeEmail: normalizedEmail,
+        refereeName: user_name.trim(),
+        inquiryId: data.id,
+        societyName: society_name.trim(),
+      });
+    } catch (err) {
+      await supabase.from('building_inquiries').delete().eq('id', data.id);
+      if (err instanceof ReferralValidationError) return res.status(err.statusCode).json({ error: err.message });
+      return res.status(400).json({ error: err.message });
+    }
+  }
+
   res.status(201).json({ message: 'Society registration submitted! We will contact you soon.', inquiry: data });
 };
 

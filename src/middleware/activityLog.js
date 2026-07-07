@@ -19,6 +19,7 @@ const MODULE_MAP = {
   '/expenses':      'expenses',
   '/promos':        'promos',
   '/inquiries':     'inquiries',
+  '/support-tickets': 'support',
 };
 
 // Map HTTP method + path patterns → human-readable action labels
@@ -48,6 +49,11 @@ function resolveAction(method, path) {
   if (p.includes('/complaints/admin') && method === 'PUT')                      return 'admin_update_complaint';
   if (p.includes('/complaints/admin') && method === 'DELETE')                   return 'admin_delete_complaint';
   if (p.includes('/complaints/admin') && method === 'POST')                     return 'admin_create_complaint';
+
+  // Support tickets
+  if (p.includes('/support-tickets') && method === 'POST' && !p.includes('/messages')) return 'create_support_ticket';
+  if (p.includes('/support-tickets') && p.includes('/messages'))                      return 'reply_support_ticket';
+  if (p.includes('/support-tickets') && method === 'PATCH')                           return 'update_support_status';
 
   // Buildings / members
   if (p.includes('/buildings/join/handle'))  return 'handle_join_request';
