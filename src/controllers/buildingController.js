@@ -21,6 +21,54 @@ const hasOnlinePayment = (methods) => {
 
 const PAYMENT_TC_ACCEPTED = 'accepted';
 
+/** Remove or nullify all DB rows that reference a user before deleting the account. */
+async function cleanupUserReferences(userId) {
+  const { data: inquiries } = await supabase
+    .from('building_inquiries')
+    .select('id')
+    .eq('user_id', userId);
+  const inquiryIds = inquiries?.map((i) => i.id) || [];
+
+  const steps = [];
+
+  if (inquiryIds.length) {
+    steps.push(supabase.from('referrals').delete().in('inquiry_id', inquiryIds));
+  }
+
+  steps.push(
+    supabase.from('referrals').delete().eq('referrer_id', userId),
+    supabase.from('join_requests').delete().eq('user_id', userId),
+    supabase.from('maintenance_payments').delete().eq('user_id', userId),
+    supabase.from('maintenance_requests').delete().eq('user_id', userId),
+    supabase.from('chats').delete().eq('user_id', userId),
+    supabase.from('vehicles').delete().eq('user_id', userId),
+    supabase.from('parking_reports').delete().eq('user_id', userId),
+    supabase.from('notifications').delete().eq('user_id', userId),
+    supabase.from('complaints').delete().eq('user_id', userId),
+    supabase.from('building_inquiries').delete().eq('user_id', userId),
+    supabase.from('subscriptions').delete().eq('user_id', userId),
+    supabase.from('user_activity_logs').delete().eq('user_id', userId),
+    supabase.from('maintenance_bills').update({ created_by: null }).eq('created_by', userId),
+    supabase.from('maintenance_bills').update({ edited_by: null }).eq('edited_by', userId),
+    supabase.from('society_funds').update({ set_by: null }).eq('set_by', userId),
+    supabase.from('meetings').update({ created_by: null }).eq('created_by', userId),
+    supabase.from('announcements').update({ created_by: null }).eq('created_by', userId),
+    supabase.from('helpline_numbers').update({ created_by: null }).eq('created_by', userId),
+    supabase.from('expense_entries').update({ added_by: null }).eq('added_by', userId),
+    supabase.from('expense_entries').update({ edited_by: null }).eq('edited_by', userId),
+    supabase.from('expense_edit_logs').update({ edited_by: null }).eq('edited_by', userId),
+    supabase.from('society_rules').update({ created_by: null }).eq('created_by', userId),
+    supabase.from('society_rules').update({ updated_by: null }).eq('updated_by', userId),
+    supabase.from('newspaper_editions').update({ uploaded_by: null }).eq('uploaded_by', userId),
+    supabase.from('newspaper_url_patterns').update({ updated_by: null }).eq('updated_by', userId),
+    supabase.from('promo_codes').update({ used_by: null }).eq('used_by', userId),
+    supabase.from('promo_codes').update({ created_by: null }).eq('created_by', userId),
+    supabase.from('qr_photos').update({ uploaded_by: null }).eq('uploaded_by', userId),
+  );
+
+  await Promise.allSettled(steps);
+}
+
 // Admin: create building only (no pramukh)
 exports.createBuildingOnly = async (req, res) => {
   const {
@@ -494,9 +542,16 @@ exports.adminDeleteUser = async (req, res) => {
   if (!target) return res.status(404).json({ error: 'User not found' });
   if (target.role === 'admin') return res.status(403).json({ error: 'Cannot delete admin account' });
 
-  const { error } = await supabase.from('users').delete().eq('id', user_id);
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ message: 'User deleted' });
+  try {
+    await cleanupUserReferences(user_id);
+
+    const { error } = await supabase.from('users').delete().eq('id', user_id);
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ message: 'User deleted' });
+  } catch (err) {
+    console.error('[Admin] Delete user error:', err);
+    res.status(500).json({ error: 'Failed to delete user', details: err.message });
+  }
 };
 
 // ── Bank Details ─────────────────────────────────────────────────────────────

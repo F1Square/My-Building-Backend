@@ -155,7 +155,7 @@ exports.fixedLogin = async (req, res) => {
 
 // User signup
 exports.signup = async (req, res) => {
-  const { name, email, password, phone, referral_code } = req.body;
+  const { name, email, password, phone } = req.body;
 
   if (!name?.trim() || !email?.trim() || !password || !phone?.trim())
     return res.status(422).json({ error: 'All fields are required' });
@@ -172,23 +172,6 @@ exports.signup = async (req, res) => {
     .from('users').select('id').eq('phone', phone.trim()).single();
   if (existingPhone) return res.status(409).json({ error: 'An account with this phone number already exists' });
 
-  // Pre-validate referral code (if provided) BEFORE creating the user,
-  // so we don't create a half-finished account on a typo'd code.
-  let referrer = null;
-  const trimmedCode = referral_code?.trim().toUpperCase();
-  if (trimmedCode) {
-    const { data: r } = await supabase
-      .from('users')
-      .select('id, email')
-      .eq('referral_code', trimmedCode)
-      .maybeSingle();
-    if (!r) return res.status(422).json({ error: 'Invalid referral code' });
-    if (r.email && r.email.toLowerCase() === normalizedEmail) {
-      return res.status(422).json({ error: 'You cannot use your own referral code' });
-    }
-    referrer = r;
-  }
-
   const hash = await bcrypt.hash(password, 12);
   const { data, error } = await supabase
     .from('users')
@@ -197,23 +180,6 @@ exports.signup = async (req, res) => {
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
-
-  // Record referral right after signup so it appears in the referrer's
-  // Refer & Earn module immediately. inquiry_id stays NULL until the
-  // referee later submits a society registration; at that point the
-  // inquiry controller will fill in the inquiry/society fields.
-  if (referrer) {
-    const { error: refErr } = await supabase.from('referrals').insert({
-      referrer_id: referrer.id,
-      inquiry_id: null,
-      referee_name: data.name,
-      referee_email: data.email,
-      society_name: 'Awaiting society registration',
-    });
-    if (refErr) {
-      console.error('Failed to record signup referral:', refErr.message);
-    }
-  }
 
   res.status(201).json({ message: 'Account created successfully', user: data });
 };

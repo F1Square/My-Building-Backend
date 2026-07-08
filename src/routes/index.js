@@ -30,5 +30,6 @@ router.use('/refer', require('./refer'));
 router.use('/newspapers', require('./newspapers'));
 router.use('/society-rules', require('./societyRules'));
 router.use('/qr-photos', require('./qrPhotos'));
+router.use('/support-tickets', require('./supportTickets'));
 
 module.exports = router;
