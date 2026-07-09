@@ -24,7 +24,7 @@ exports.addHelpline = async (req, res) => {
 
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
   if (!profession?.trim() || !name?.trim() || !phone?.trim())
-    return res.status(422).json({ error: 'profession, name and phone are required' });
+    return res.status(422).json({ error: 'Profession, name and phone are required' });
   if (profession.trim().length > 100) return res.status(422).json({ error: 'Profession must not exceed 100 characters' });
   if (name.trim().length > 100) return res.status(422).json({ error: 'Name must not exceed 100 characters' });
   if (!PHONE_RE.test(phone.trim()))
@@ -46,13 +46,17 @@ exports.updateHelpline = async (req, res) => {
   const building_id = req.user.building_id;
 
   if (!profession?.trim() || !name?.trim() || !phone?.trim())
-    return res.status(422).json({ error: 'profession, name and phone are required' });
+    return res.status(422).json({ error: 'Profession, name and phone are required' });
   if (!PHONE_RE.test(phone.trim()))
     return res.status(422).json({ error: 'Phone must be a valid 10-digit Indian mobile number' });
 
   let query = supabase
     .from('helpline_numbers')
-    .update({ profession: profession.trim(), name: name.trim(), phone: phone.trim() })
+    .update({
+      profession: profession.trim(),
+      name: name.trim(),
+      phone: phone.trim(),
+    })
     .eq('id', id);
 
   // Pramukh can only update their own building

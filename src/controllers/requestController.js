@@ -1,5 +1,6 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 
 // User: submit maintenance request
 exports.submitRequest = async (req, res) => {
@@ -18,10 +19,9 @@ exports.submitRequest = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   await ns.notifyMembersExcept(building_id, user_id, {
-    title: 'New Maintenance Request',
-    body: `${name} submitted: ${title}`,
     type: 'maintenance_request',
-    meta: { request_id: data.id }
+    meta: { request_id: data.id },
+    build: (lang) => createCopy(lang).maintenanceRequestNew(name, title.trim()),
   });
 
   res.status(201).json({ message: 'Request submitted', request: data });
@@ -59,10 +59,9 @@ exports.updateRequestStatus = async (req, res) => {
   if (error || !data) return res.status(404).json({ error: 'Request not found' });
 
   await ns.notifyUser(data.user_id, {
-    title: 'Request Update',
-    body: `Your request "${data.title}" is now ${status.replace('_', ' ')}`,
     type: 'request_update',
-    meta: { request_id }
+    meta: { request_id },
+    build: (lang) => createCopy(lang).maintenanceRequestUpdate(data.title, status),
   });
 
   res.json({ message: 'Status updated', request: data });

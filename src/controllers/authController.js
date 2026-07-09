@@ -22,11 +22,29 @@ const signToken = (payload) =>
 exports.getMe = async (req, res) => {
   const { data, error } = await supabase
     .from('users')
-    .select('id, name, email, role, building_id, flat_no, status, phone, wing, total_members')
+    .select('id, name, email, role, building_id, flat_no, status, phone, wing, total_members, app_language')
     .eq('id', req.user.id)
     .single();
   if (error || !data) return res.status(404).json({ error: 'User not found' });
   res.json({ user: data });
+};
+
+exports.setAppLanguage = async (req, res) => {
+  const { app_language } = req.body;
+  const VALID = ['en', 'hi', 'gu'];
+  if (!VALID.includes(app_language)) {
+    return res.status(422).json({ error: 'app_language must be en, hi, or gu' });
+  }
+
+  const { data, error } = await supabase
+    .from('users')
+    .update({ app_language })
+    .eq('id', req.user.id)
+    .select('id, app_language')
+    .single();
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Language updated', app_language: data.app_language });
 };
 
 // Unified login — auto-detects admin, pramukh, or user by email+password

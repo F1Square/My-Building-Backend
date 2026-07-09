@@ -1,5 +1,6 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 const { uploadImage } = require('../utils/imageUploadHelper');
 const { singleImageUpload, requireFile } = require('../middleware/imageUpload');
 const { formatVisitorFlatLabel } = require('../utils/flatMatchHelper');
@@ -77,10 +78,9 @@ exports.addVisitor = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   await ns.notifyMembers(building_id, {
-    title: '👁 Visitor Alert',
-    body: `${name} is visiting Flat ${flat_no} — ${purpose || 'No purpose specified'}`,
     type: 'visitor',
-    meta: { visitor_id: data.id }
+    meta: { visitor_id: data.id },
+    build: (lang) => createCopy(lang).visitorWatchman(name, flat_no, purpose),
   });
 
   res.status(201).json({ message: 'Visitor logged', visitor: data });

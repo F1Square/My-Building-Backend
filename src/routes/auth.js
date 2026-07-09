@@ -1,5 +1,5 @@
 const router = require('express').Router();
-const { fixedLogin, signup, login, unifiedLogin, getMe, forgotPassword, verifyOtp, resetPassword } = require('../controllers/authController');
+const { fixedLogin, signup, login, unifiedLogin, getMe, setAppLanguage, forgotPassword, verifyOtp, resetPassword } = require('../controllers/authController');
 const { authenticate } = require('../middleware/auth');
 const { validate, required, isEmail, minLen, isPhone, isStrongPassword } = require('../utils/validators');
 const rateLimiter = require('../middleware/rateLimiter');
@@ -14,6 +14,7 @@ const otpLimiter = rateLimiter(10, 60_000);          // 10 OTP verifications/min
 router.post('/fixed-login', loginLimiter, fixedLogin);
 router.post('/login/unified', loginLimiter, unifiedLogin);
 router.get('/me', authenticate, getMe);
+router.post('/language', authenticate, setAppLanguage);
 
 // Unauthenticated logging endpoint for frontend crash tracking during login
 router.post('/client-log', (req, res) => {
@@ -54,19 +55,25 @@ router.post('/reset-password', resetPassword);
 router.post('/push-token', authenticate, async (req, res) => {
   const { expo_push_token } = req.body;
   if (!expo_push_token) return res.status(422).json({ error: 'expo_push_token is required' });
-  
-  // Respond immediately to avoid blocking the client
+
   res.json({ message: 'Push token saved' });
-  
-  // Update database in background (fire-and-forget)
-  const supabase = require('../supabase');
-  supabase.from('users').update({ expo_push_token }).eq('id', req.user.id)
-    .then(() => {
-      console.log(`[push-token] Token saved for user ${req.user.id}`);
-    })
-    .catch((err) => {
-      console.error(`[push-token] Failed to save token for user ${req.user.id}:`, err);
-    });
+
+  try {
+    const supabase = require('../supabase');
+    // One physical device token must belong to only one account — prevents duplicate pushes
+    await supabase
+      .from('users')
+      .update({ expo_push_token: null })
+      .eq('expo_push_token', expo_push_token)
+      .neq('id', req.user.id);
+    await supabase
+      .from('users')
+      .update({ expo_push_token })
+      .eq('id', req.user.id);
+    console.log(`[push-token] Token saved for user ${req.user.id}`);
+  } catch (err) {
+    console.error(`[push-token] Failed to save token for user ${req.user.id}:`, err);
+  }
 });
 
 // Update own profile details

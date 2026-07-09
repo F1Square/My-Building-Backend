@@ -1,5 +1,6 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 const { uploadImage } = require('../utils/imageUploadHelper');
 const { resolveVisitorFlat, parseBuildingWings } = require('../utils/flatMatchHelper');
 
@@ -28,18 +29,16 @@ async function processVisitorEntryBackground({
     await supabase.from('visitors').update({ photo_url }).eq('id', visitorId);
   }
 
-  const purposeText = purpose?.trim() || 'No purpose specified';
-  const notification = {
-    title: '🚪 Visitor at Your Door',
-    body: `${name} is visiting Flat ${flat_no} — ${purposeText}`,
-    type: 'visitor',
-    meta: { visitor_id: visitorId, flat_no },
-  };
+  const purposeText = purpose?.trim() || null;
 
   if (flatResidents.length > 0) {
     await ns.notifyMembers(
       building_id,
-      notification,
+      {
+        type: 'visitor',
+        meta: { visitor_id: visitorId, flat_no },
+        build: (lang) => createCopy(lang).visitorAtDoor(name, flat_no, purposeText),
+      },
       flatResidents.map((r) => r.id),
     );
   }

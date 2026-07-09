@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const supabase = require('../supabase');
 const { notifyUser } = require('./notificationService');
+const { createCopy } = require('./notificationCopy');
 
 // Activity logs older than this are purged daily to keep the table small
 // and queries fast. Lines up with the "clears after 6 days" UI label.
@@ -71,10 +72,9 @@ function startScheduler() {
 
         for (const p of payments) {
           await notifyUser(p.user_id, {
-            title: '⏰ Payment Reminder',
-            body: `Tomorrow is the last day to pay for "${bill.description}". Amount: ₹${p.amount}. Please pay fast!`,
             type: 'reminder',
-            meta: { bill_id: bill.id }
+            meta: { bill_id: bill.id },
+            build: (lang) => createCopy(lang).paymentReminderScheduled(bill.description, p.amount),
           });
         }
       }

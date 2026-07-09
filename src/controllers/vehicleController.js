@@ -1,5 +1,6 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 
 // Indian vehicle number: 2 letters + 2 digits + 1-3 letters + 4 digits  e.g. GJ05HR4533
 const VEHICLE_RE = /^[A-Z]{2}\d{2}[A-Z]{1,3}\d{4}$/;
@@ -133,10 +134,9 @@ exports.reportParking = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   await ns.notifyMembers(building_id, {
-    title: '🚗 Parking Misconduct Reported',
-    body: `${name} reported: ${description}${vehicle_number ? ` (${vehicle_number})` : ''}`,
     type: 'parking_report',
-    meta: { report_id: data.id }
+    meta: { report_id: data.id },
+    build: (lang) => createCopy(lang).parkingReport(name, description, vehicle_number),
   });
 
   res.status(201).json({ message: 'Report submitted', report: data });
@@ -188,10 +188,9 @@ exports.sendParkingReminder = async (req, res) => {
   if (!vehicle) return res.status(404).json({ error: 'Vehicle not found' });
 
   await ns.notifyUser(vehicle.users.id, {
-    title: '🚗 Parking Reminder',
-    body: message || `Your vehicle ${vehicle_number.toUpperCase()} is causing a parking issue. Please resolve it.`,
     type: 'parking_reminder',
-    meta: { vehicle_number }
+    meta: { vehicle_number },
+    build: (lang) => createCopy(lang).parkingReminder(vehicle_number, message),
   });
 
   res.json({ message: `Reminder sent to ${vehicle.users.name}` });

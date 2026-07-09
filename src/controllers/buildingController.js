@@ -1,6 +1,7 @@
 const supabase = require('../supabase');
 const { v4: uuidv4 } = require('uuid');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_RE = /^[6-9]\d{9}$/;
@@ -192,10 +193,9 @@ exports.requestJoin = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   await ns.notifyPramukh(resolvedBuildingId, {
-    title: 'Join Request',
-    body: `${req.user.name} wants to join your building`,
     type: 'join_request',
-    meta: { requester_id: user_id, building_id: resolvedBuildingId }
+    meta: { requester_id: user_id, building_id: resolvedBuildingId },
+    build: (lang) => createCopy(lang).joinRequest(req.user.name),
   });
 
   res.json({ message: 'Join request sent', building_code: getBuildingCode(resolvedBuildingId) });
@@ -221,12 +221,11 @@ exports.handleJoinRequest = async (req, res) => {
   }
 
   await ns.notifyUser(req_data.user_id, {
-    title: action === 'approve' ? 'Request Approved ✅' : 'Request Rejected',
-    body: action === 'approve'
-      ? 'You have been approved to join the building.'
-      : 'Your join request was rejected by the Pramukh.',
     type: 'join_response',
-    meta: { building_id }
+    meta: { building_id },
+    build: (lang) => (action === 'approve'
+      ? createCopy(lang).joinApproved()
+      : createCopy(lang).joinRejected()),
   });
 
   res.json({ message: `Request ${action}d` });
@@ -492,10 +491,9 @@ exports.adminPromoteToPramukh = async (req, res) => {
   // Best-effort notification — don't fail the request if it errors.
   try {
     await ns.notifyUser(user_id, {
-      title: 'You are now a Pramukh ⭐',
-      body: 'An admin has promoted you to Pramukh. You now have building management access.',
       type: 'role_change',
       meta: { role: 'pramukh' },
+      build: (lang) => createCopy(lang).promotedPramukh(),
     });
   } catch (_) { /* noop */ }
 
@@ -523,10 +521,9 @@ exports.adminDemoteToUser = async (req, res) => {
 
   try {
     await ns.notifyUser(user_id, {
-      title: 'Role updated',
-      body: 'An admin has updated your role to User.',
       type: 'role_change',
       meta: { role: 'user' },
+      build: (lang) => createCopy(lang).demotedToUser(),
     });
   } catch (_) { /* noop */ }
 
