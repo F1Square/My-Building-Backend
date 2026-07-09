@@ -1,6 +1,7 @@
 const supabase = require('../supabase');
 const PDFDocument = require('pdfkit');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 const addMaintenanceExpense = require('../utils/addMaintenanceExpense');
 const { uploadImage } = require('../utils/imageUploadHelper');
 const { getPaymentCallbackUrl } = require('../utils/backendUrl');
@@ -86,9 +87,8 @@ exports.addBill = async (req, res) => {
         }))
       );
       await ns.notifyMembers(building_id, {
-        title: '🧾 Maintenance Bill',
-        body: `New bill of ₹${parsedAmount} for ${MONTHS[billMonth]} ${billYear}. Due: ${due_date}${parsedPenalty > 0 ? `. Penalty: ₹${parsedPenalty} after due date` : ''}`,
         type: 'bill', meta: { bill_id: bill.id },
+        build: (lang) => createCopy(lang).maintenanceBill(parsedAmount, billMonth, billYear, due_date, parsedPenalty),
       });
     }
     return res.status(201).json({ message: 'Bill added', bill });
@@ -123,9 +123,8 @@ exports.addBill = async (req, res) => {
           }))
         );
         await ns.notifyMembers(building_id, {
-          title: '💧 Water Meter Bill',
-          body: `Water bill of ₹${parsedAmount} is due by ${due_date}.`,
           type: 'bill', meta: { bill_id: bill.id },
+          build: (lang) => createCopy(lang).waterBillUniform(parsedAmount, due_date),
         });
       }
       return res.status(201).json({ message: 'Water meter bill added', bill });
@@ -162,11 +161,13 @@ exports.addBill = async (req, res) => {
       }))
     );
 
+    const notifiedUsers = new Set();
     for (const entry of flat_amounts) {
+      if (notifiedUsers.has(entry.user_id)) continue;
+      notifiedUsers.add(entry.user_id);
       await ns.notifyUser(entry.user_id, {
-        title: '💧 Water Meter Bill',
-        body: `Your water bill of ₹${entry.amount} is due by ${due_date}.`,
         type: 'bill', meta: { bill_id: bill.id },
+        build: (lang) => createCopy(lang).waterBillFlat(entry.amount, due_date),
       });
     }
     return res.status(201).json({ message: 'Water meter bill added', bill });
@@ -214,9 +215,8 @@ exports.addBill = async (req, res) => {
           }))
         );
         await ns.notifyMembers(building_id, {
-          title: '📋 Special Bill',
-          body: `${description}: ₹${parsedAmount} due by ${due_date}.`,
           type: 'bill', meta: { bill_id: bill.id },
+          build: (lang) => createCopy(lang).specialBillUniform(description, parsedAmount, due_date),
         }, targeting_mode === 'targeted' ? targetMembers.map(m => m.id) : null);
       }
       return res.status(201).json({ message: 'Special bill added', bill });
@@ -252,11 +252,13 @@ exports.addBill = async (req, res) => {
         status: 'pending', category: 'special',
       }))
     );
+    const notifiedUsers = new Set();
     for (const entry of flat_amounts) {
+      if (notifiedUsers.has(entry.user_id)) continue;
+      notifiedUsers.add(entry.user_id);
       await ns.notifyUser(entry.user_id, {
-        title: '📋 Special Bill',
-        body: `${description}: ₹${entry.amount} due by ${due_date}.`,
         type: 'bill', meta: { bill_id: bill.id },
+        build: (lang) => createCopy(lang).specialBillFlat(description, entry.amount, due_date),
       });
     }
     return res.status(201).json({ message: 'Special bill added', bill });
@@ -597,10 +599,9 @@ exports.approvePayment = async (req, res) => {
   // Notify the resident their manual payment was approved
   try {
     await ns.notifyUser(record.user_id, {
-      title: '✅ Payment Approved',
-      body: `Your ${method} payment of ₹${Number(record.total_amount || record.amount).toLocaleString('en-IN')} has been approved. You can now download the receipt.`,
       type: 'payment_approved',
       meta: { payment_record_id: id },
+      build: (lang) => createCopy(lang).paymentApproved(method, record.total_amount || record.amount),
     });
   } catch {}
 
@@ -648,15 +649,14 @@ exports.requestCashPayment = async (req, res) => {
       .eq('status', 'approved');
 
     const bill = record.maintenance_bills;
-    const period = bill?.month ? `${MONTHS[bill.month]} ${bill.year}` : (bill?.description || '');
-    const amount = Number(record.total_amount || record.amount).toLocaleString('en-IN');
+    const period = bill?.month ? createCopy('en').monthYear(bill.month, bill.year) : (bill?.description || '');
+    const amount = record.total_amount || record.amount;
 
     if (approvers?.length) {
       await Promise.all(approvers.map((a) => ns.notifyUser(a.id, {
-        title: '💵 Cash payment requested',
-        body: `Resident wants to pay ₹${amount} ${period ? `for ${period}` : ''} in cash. Approve once collected.`,
         type: 'cash_requested',
         meta: { payment_record_id: id },
+        build: (lang) => createCopy(lang).cashPaymentRequested(amount, period),
       })));
     }
   } catch {}
@@ -1104,7 +1104,7 @@ exports.sendReminder = async (req, res) => {
 
   let query = supabase
     .from('maintenance_payments')
-    .select('id, user_id, building_id, maintenance_bills(month, year, amount), users(name, expo_push_token)')
+    .select('id, user_id, building_id, maintenance_bills(month, year, amount)')
     .eq('status', 'pending');
 
   if (building_id) query = query.eq('building_id', building_id);
@@ -1115,43 +1115,23 @@ exports.sendReminder = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
   if (!pending?.length) return res.json({ message: 'No pending payments found' });
 
-  // Insert in-app notifications
-  await supabase.from('notifications').insert(
-    pending.map((p) => ({
-      user_id: p.user_id,
-      title: '⏰ Payment Reminder',
-      body: `Please pay your maintenance of ₹${p.maintenance_bills?.amount} for ${MONTHS[p.maintenance_bills?.month]} ${p.maintenance_bills?.year}`,
-      type: 'reminder',
-      meta: { payment_record_id: p.id }
-    }))
-  );
-
-  // Send Expo push notifications to users who have a push token
-  const pushTokens = pending
-    .map((p) => p.users?.expo_push_token)
-    .filter(Boolean);
-
-  if (pushTokens.length) {
-    const messages = pushTokens.map((token) => ({
-      to: token,
-      sound: 'default',
-      title: '⏰ Maintenance Reminder',
-      body: `You have a pending maintenance payment. Please pay at your earliest.`,
-      data: { type: 'reminder' },
-    }));
-    try {
-      await fetch('https://exp.host/--/api/v2/push/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify(messages),
-      });
-    } catch (pushErr) {
-      console.error('Push notification error:', pushErr);
-      // Don't fail the request if push fails
-    }
+  const byUser = new Map();
+  for (const p of pending) {
+    if (!byUser.has(p.user_id)) byUser.set(p.user_id, p);
   }
+  const uniquePending = [...byUser.values()];
 
-  res.json({ message: `Reminder sent to ${pending.length} member(s)` });
+  await Promise.all(uniquePending.map((p) => ns.notifyUser(p.user_id, {
+    type: 'reminder',
+    meta: { payment_record_id: p.id },
+    build: (lang) => createCopy(lang).paymentReminderManual(
+      p.maintenance_bills?.amount,
+      p.maintenance_bills?.month,
+      p.maintenance_bills?.year,
+    ),
+  })));
+
+  res.json({ message: `Reminder sent to ${uniquePending.length} member(s)` });
 };
 
 // Get transfer status for debugging

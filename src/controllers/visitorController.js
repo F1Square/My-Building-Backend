@@ -1,7 +1,20 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 const { uploadImage } = require('../utils/imageUploadHelper');
 const { singleImageUpload, requireFile } = require('../middleware/imageUpload');
+const { formatVisitorFlatLabel } = require('../utils/flatMatchHelper');
+
+function visitorFlatLabelsForUser(user) {
+  const flat = user?.flat_no?.trim();
+  if (!flat) return [];
+  const labels = new Set([flat]);
+  const wing = user?.wing?.trim();
+  if (wing && wing !== 'Building-Wide') {
+    labels.add(formatVisitorFlatLabel(wing, flat, true));
+  }
+  return [...labels];
+}
 
 // Upload visitor photo to Cloudinary
 exports.uploadVisitorPhoto = async (req, res) => {
@@ -65,10 +78,9 @@ exports.addVisitor = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   await ns.notifyMembers(building_id, {
-    title: '👁 Visitor Alert',
-    body: `${name} is visiting Flat ${flat_no} — ${purpose || 'No purpose specified'}`,
     type: 'visitor',
-    meta: { visitor_id: data.id }
+    meta: { visitor_id: data.id },
+    build: (lang) => createCopy(lang).visitorWatchman(name, flat_no, purpose),
   });
 
   res.status(201).json({ message: 'Visitor logged', visitor: data });
@@ -103,9 +115,9 @@ exports.getVisitors = async (req, res) => {
 
   // Users only see visitors that came to their own flat
   if (isUser) {
-    const userFlat = req.user.flat_no;
-    if (!userFlat) return res.json([]); // no flat assigned, show nothing
-    q = q.eq('flat_no', userFlat);
+    const flatLabels = visitorFlatLabelsForUser(req.user);
+    if (!flatLabels.length) return res.json([]);
+    q = q.in('flat_no', flatLabels);
   }
 
   if (date) {
@@ -143,9 +155,9 @@ exports.getVisitorDates = async (req, res) => {
 
   // Users only see dates for their own flat's visitors
   if (isUser) {
-    const userFlat = req.user.flat_no;
-    if (!userFlat) return res.json({ dates: [] });
-    q = q.eq('flat_no', userFlat);
+    const flatLabels = visitorFlatLabelsForUser(req.user);
+    if (!flatLabels.length) return res.json({ dates: [] });
+    q = q.in('flat_no', flatLabels);
   }
 
   const { data, error } = await q;

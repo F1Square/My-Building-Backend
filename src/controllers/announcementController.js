@@ -1,5 +1,6 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 
 const VALID_PRIORITIES = ['normal', 'urgent'];
 
@@ -29,11 +30,10 @@ exports.addAnnouncement = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   await ns.notifyMembers(building_id, {
-    title: `${priority === 'urgent' ? 'URGENT: ' : ''}${title}`,
-    body,
     type: priority === 'urgent' ? 'announcement_urgent' : 'announcement',
-    meta: { announcement_id: data.id, priority: priority || 'normal' }
-  });
+    meta: { announcement_id: data.id, priority: priority || 'normal' },
+    build: (lang) => createCopy(lang).announcement(title.trim(), body.trim(), priority === 'urgent'),
+  }, null, req.user.id);
 
   res.status(201).json({ message: 'Announcement posted', announcement: data });
 };

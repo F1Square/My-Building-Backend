@@ -1,4 +1,5 @@
 const supabase = require('../supabase');
+const { normalizeLang } = require('./notificationCopy');
 
 let expoSdkPromise = null;
 
@@ -20,28 +21,75 @@ async function getExpoSdk() {
   return expoSdkPromise;
 }
 
-async function filterValidExpoMessages(recipients, mapMessage) {
-  const recipientsWithToken = (recipients || []).filter((r) => r?.expo_push_token);
+function dedupeRecipients(recipients) {
+  const map = new Map();
+  for (const r of recipients || []) {
+    if (r?.id && !map.has(r.id)) map.set(r.id, r);
+  }
+  return [...map.values()];
+}
+
+function dedupePushMessages(messages) {
+  const seen = new Set();
+  const out = [];
+  for (const m of messages || []) {
+    if (!m?.to || seen.has(m.to)) continue;
+    seen.add(m.to);
+    out.push(m);
+  }
+  return out;
+}
+
+function resolveMessage(payload, lang) {
+  const type = payload.type;
+  const meta = payload.meta || {};
+  if (typeof payload.build === 'function') {
+    const { title, body } = payload.build(normalizeLang(lang));
+    return { title, body, type, meta };
+  }
+  return {
+    title: payload.title,
+    body: payload.body,
+    type,
+    meta,
+  };
+}
+
+async function buildPushMessages(recipients, payload) {
+  const recipientsWithToken = dedupeRecipients(recipients).filter((r) => r?.expo_push_token);
   if (!recipientsWithToken.length) return [];
 
   try {
     const { Expo } = await getExpoSdk();
-    return recipientsWithToken
-      .filter((r) => Expo.isExpoPushToken(r.expo_push_token))
-      .map((r) => mapMessage(r.expo_push_token));
+    const tokenSeen = new Set();
+    const messages = [];
+    for (const r of recipientsWithToken) {
+      const token = r.expo_push_token;
+      if (!Expo.isExpoPushToken(token) || tokenSeen.has(token)) continue;
+      tokenSeen.add(token);
+      const { title, body, type, meta } = resolveMessage(payload, r.app_language);
+      messages.push({
+        to: token,
+        sound: 'default',
+        title,
+        body,
+        data: { type, ...meta },
+      });
+    }
+    return messages;
   } catch (error) {
     console.error('Error validating Expo push tokens:', error);
     return [];
   }
 }
 
-// Helper to send push notifications via Expo
 async function sendPushNotifications(messages) {
-  if (!messages?.length) return;
+  const deduped = dedupePushMessages(messages);
+  if (!deduped.length) return;
 
   try {
     const { expo } = await getExpoSdk();
-    const chunks = expo.chunkPushNotifications(messages);
+    const chunks = expo.chunkPushNotifications(deduped);
     for (const chunk of chunks) {
       try {
         await expo.sendPushNotificationsAsync(chunk);
@@ -54,111 +102,79 @@ async function sendPushNotifications(messages) {
   }
 }
 
-// Notify a single user
-exports.notifyUser = async (user_id, { title, body, type, meta = {} }) => {
-  // 1. Record in DB
+// Notify a single user (payload.build = (lang) => ({ title, body }) for localized text)
+exports.notifyUser = async (user_id, payload) => {
+  const { data: user } = await supabase
+    .from('users')
+    .select('expo_push_token, app_language')
+    .eq('id', user_id)
+    .single();
+
+  const { title, body, type, meta } = resolveMessage(payload, user?.app_language);
+
   await supabase.from('notifications').insert({ user_id, title, body, type, meta });
 
-  // 2. Send Push
-  const { data: user } = await supabase.from('users').select('expo_push_token').eq('id', user_id).single();
   if (user?.expo_push_token) {
-    const messages = await filterValidExpoMessages([user], (token) => ({
-      to: token,
-      sound: 'default',
-      title,
-      body,
-      data: { type, ...meta },
-    }));
+    const messages = await buildPushMessages([user], payload);
     await sendPushNotifications(messages);
   }
 };
 
-// Notify a list of members or all approved members of a building
-exports.notifyMembers = async (building_id, { title, body, type, meta = {} }, specific_user_ids = null) => {
-  let query = supabase.from('users').select('id, expo_push_token').eq('building_id', building_id).eq('status', 'approved');
-  
+// Notify members — each user gets title/body in their app_language
+exports.notifyMembers = async (building_id, payload, specific_user_ids = null, exclude_user_id = null) => {
+  let query = supabase
+    .from('users')
+    .select('id, expo_push_token, app_language')
+    .eq('building_id', building_id)
+    .eq('status', 'approved');
+
   if (specific_user_ids && Array.isArray(specific_user_ids)) {
     query = query.in('id', specific_user_ids);
   }
+  if (exclude_user_id) {
+    query = query.neq('id', exclude_user_id);
+  }
 
   const { data: members } = await query;
-  if (!members?.length) return;
+  const uniqueMembers = dedupeRecipients(members);
+  if (!uniqueMembers.length) return;
 
-  // 1. Record in DB
-  await supabase.from('notifications').insert(
-    members.map((m) => ({ user_id: m.id, title, body, type, meta }))
-  );
+  const rows = uniqueMembers.map((m) => {
+    const { title, body, type, meta } = resolveMessage(payload, m.app_language);
+    return { user_id: m.id, title, body, type, meta };
+  });
 
-  // 2. Send Push
-  const messages = await filterValidExpoMessages(members, (token) => ({
-    to: token,
-    sound: 'default',
-    title,
-    body,
-    data: { type, ...meta },
-  }));
+  await supabase.from('notifications').insert(rows);
 
-  if (messages.length > 0) {
-    await sendPushNotifications(messages);
-  }
+  const messages = await buildPushMessages(uniqueMembers, payload);
+  await sendPushNotifications(messages);
 };
 
-// Notify the pramukh of a building
-exports.notifyPramukh = async (building_id, { title, body, type, meta = {} }) => {
+exports.notifyPramukh = async (building_id, payload) => {
   const { data: pramukhs } = await supabase
     .from('users')
-    .select('id, expo_push_token')
+    .select('id, expo_push_token, app_language')
     .eq('building_id', building_id)
     .eq('role', 'pramukh')
     .eq('status', 'approved');
 
-  if (!pramukhs?.length) return;
+  const uniquePramukhs = dedupeRecipients(pramukhs);
+  if (!uniquePramukhs.length) return;
 
-  // 1. Record in DB
-  await supabase.from('notifications').insert(
-    pramukhs.map(p => ({ user_id: p.id, title, body, type, meta }))
-  );
+  const rows = uniquePramukhs.map((p) => {
+    const { title, body, type, meta } = resolveMessage(payload, p.app_language);
+    return { user_id: p.id, title, body, type, meta };
+  });
 
-  // 2. Send Push
-  const messages = await filterValidExpoMessages(pramukhs, (token) => ({
-    to: token,
-    sound: 'default',
-    title,
-    body,
-    data: { type, ...meta },
-  }));
+  await supabase.from('notifications').insert(rows);
 
-  if (messages.length > 0) {
-    await sendPushNotifications(messages);
-  }
+  const messages = await buildPushMessages(uniquePramukhs, payload);
+  await sendPushNotifications(messages);
 };
 
-// Notify members excluding a specific user (e.g. the sender)
-exports.notifyMembersExcept = async (building_id, exclude_user_id, { title, body, type, meta = {} }) => {
-  const { data: members } = await supabase
-    .from('users')
-    .select('id, expo_push_token')
-    .eq('building_id', building_id)
-    .eq('status', 'approved')
-    .neq('id', exclude_user_id);
-
-  if (!members?.length) return;
-
-  // 1. Record in DB
-  await supabase.from('notifications').insert(
-    members.map((m) => ({ user_id: m.id, title, body, type, meta }))
-  );
-
-  // 2. Send Push
-  const messages = await filterValidExpoMessages(members, (token) => ({
-    to: token,
-    sound: 'default',
-    title,
-    body,
-    data: { type, ...meta },
-  }));
-
-  if (messages.length > 0) {
-    await sendPushNotifications(messages);
-  }
+exports.notifyMembersExcept = async (building_id, exclude_user_id, payload) => {
+  return exports.notifyMembers(building_id, payload, null, exclude_user_id);
 };
+
+exports.resolveMessage = resolveMessage;
+exports.normalizeLang = normalizeLang;

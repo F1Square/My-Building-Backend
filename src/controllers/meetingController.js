@@ -1,5 +1,6 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 
 // Pramukh: schedule a meeting
 exports.addMeeting = async (req, res) => {
@@ -21,10 +22,9 @@ exports.addMeeting = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   await ns.notifyMembers(building_id, {
-    title: '📅 Meeting Scheduled',
-    body: `${title} on ${new Date(date_time).toLocaleString('en-IN')}${location ? ` at ${location}` : ''}`,
     type: 'meeting',
-    meta: { meeting_id: data.id }
+    meta: { meeting_id: data.id },
+    build: (lang) => createCopy(lang).meetingScheduled(title, date_time, location),
   });
 
   res.status(201).json({ message: 'Meeting scheduled', meeting: data });

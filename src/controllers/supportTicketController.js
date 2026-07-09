@@ -1,12 +1,13 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 
 const VALID_STATUS = ['open', 'in_progress', 'resolved', 'closed'];
 
-async function notifyAdmins({ title, body, meta }) {
+async function notifyAdmins(payload) {
   const { data: admins } = await supabase.from('users').select('id').eq('role', 'admin');
   for (const admin of admins || []) {
-    await ns.notifyUser(admin.id, { title, body, type: 'support', meta });
+    await ns.notifyUser(admin.id, { type: 'support', ...payload });
   }
 }
 
@@ -75,9 +76,8 @@ exports.createTicket = async (req, res) => {
   }
 
   await notifyAdmins({
-    title: 'New Help & Support ticket',
-    body: `${req.user.name}: ${subject.trim()}`,
     meta: { ticket_id: ticket.id },
+    build: (lang) => createCopy(lang).supportTicketNew(req.user.name, subject.trim()),
   });
 
   res.status(201).json({ message: 'Support ticket created', ticket });
@@ -174,16 +174,14 @@ exports.addMessage = async (req, res) => {
 
   if (isAdmin && ticket.user_id) {
     await ns.notifyUser(ticket.user_id, {
-      title: 'Support reply received',
-      body: `Admin replied to: ${ticket.subject}`,
       type: 'support',
       meta: { ticket_id: id },
+      build: (lang) => createCopy(lang).supportReply(ticket.subject),
     });
   } else if (!isAdmin) {
     await notifyAdmins({
-      title: 'Support ticket updated',
-      body: `${req.user.name} replied on: ${ticket.subject}`,
       meta: { ticket_id: id },
+      build: (lang) => createCopy(lang).supportUserReply(req.user.name, ticket.subject),
     });
   }
 
@@ -218,12 +216,10 @@ exports.updateStatus = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   if (ticket.user_id && status !== ticket.status) {
-    const label = status.replace(/_/g, ' ');
     await ns.notifyUser(ticket.user_id, {
-      title: 'Support ticket updated',
-      body: `Your ticket "${ticket.subject}" is now ${label}`,
       type: 'support',
       meta: { ticket_id: id, status },
+      build: (lang) => createCopy(lang).supportStatus(ticket.subject, status),
     });
   }
 

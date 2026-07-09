@@ -1,6 +1,10 @@
 const supabase = require('../supabase');
 const { uploadImage } = require('../utils/imageUploadHelper');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
+const { userDisplayName, mapComplaint, mapComplaints } = require('../utils/userDisplayName');
+
+const USER_FIELDS = 'name, email, flat_no, wing';
 
 // Upload complaint attachment to Cloudinary
 exports.uploadComplaintAttachment = async (req, res) => {
@@ -59,20 +63,24 @@ exports.createComplaint = async (req, res) => {
   const { data, error } = await supabase
     .from('complaints')
     .insert({ user_id, building_id, title: title.trim(), description: description?.trim(), category, photo_url: finalPhotoUrl })
-    .select('*, users(name, flat_no, wing)')
+    .select(`*, users(${USER_FIELDS})`)
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
 
+  const reporterName = userDisplayName(data.users);
+
   // Notify members and pramukh
   await ns.notifyMembers(building_id, {
-    title: '📢 New Complaint Raised',
-    body: `${req.user.name} (${data.users?.flat_no}): ${title}`,
     type: 'complaint',
-    meta: { complaint_id: data.id }
+    meta: { complaint_id: data.id },
+    build: (lang) => {
+      const c = createCopy(lang);
+      return c.complaintNew(reporterName, c.residentFlatLabel(data.users), title.trim());
+    },
   });
 
-  res.status(201).json({ message: 'Complaint submitted', complaint: data });
+  res.status(201).json({ message: 'Complaint submitted', complaint: mapComplaint(data) });
 };
 
 // User: get only their own complaints
@@ -99,7 +107,7 @@ exports.getBuildingComplaints = async (req, res) => {
 
   let query = supabase
     .from('complaints')
-    .select('id, user_id, building_id, title, description, category, status, remark, created_at, updated_at, users(name, flat_no, wing)')
+    .select(`id, user_id, building_id, title, description, category, status, remark, created_at, updated_at, users(${USER_FIELDS})`)
     .eq('building_id', building_id)
     .order('created_at', { ascending: false });
 
@@ -107,7 +115,7 @@ exports.getBuildingComplaints = async (req, res) => {
 
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json(mapComplaints(data));
 };
 
 // Get a single complaint by id (detail view — avoids passing large payloads via navigation)
@@ -116,7 +124,7 @@ exports.getComplaintById = async (req, res) => {
 
   const { data, error } = await supabase
     .from('complaints')
-    .select('*, users(name, flat_no, wing), buildings(name)')
+    .select(`*, users(${USER_FIELDS}), buildings(name)`)
     .eq('id', id)
     .single();
 
@@ -124,18 +132,18 @@ exports.getComplaintById = async (req, res) => {
 
   const { role, id: userId, building_id } = req.user;
 
-  if (role === 'admin') return res.json(data);
+  if (role === 'admin') return res.json(mapComplaint(data));
 
   if (role === 'pramukh') {
     if (data.building_id !== building_id) {
       return res.status(403).json({ error: 'Access denied' });
     }
-    return res.json(data);
+    return res.json(mapComplaint(data));
   }
 
   // user: own complaint or any complaint in their building (society view)
   if (data.user_id === userId || data.building_id === building_id) {
-    return res.json(data);
+    return res.json(mapComplaint(data));
   }
 
   return res.status(403).json({ error: 'Access denied' });
@@ -158,11 +166,11 @@ exports.updateComplaintStatus = async (req, res) => {
     .from('complaints')
     .update({ status, remark: remark?.trim() || null, updated_at: new Date().toISOString() })
     .eq('id', id)
-    .select('*, users(name, flat_no, wing)')
+    .select(`*, users(${USER_FIELDS})`)
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
-  res.json({ message: 'Status updated', complaint: data });
+  res.json({ message: 'Status updated', complaint: mapComplaint(data) });
 };
 
 // Admin: get all complaints, optionally filtered by building
@@ -171,7 +179,7 @@ exports.adminGetComplaints = async (req, res) => {
 
   let query = supabase
     .from('complaints')
-    .select('id, user_id, building_id, title, description, category, status, remark, created_at, updated_at, users(name, flat_no, wing), buildings(name)')
+    .select(`id, user_id, building_id, title, description, category, status, remark, created_at, updated_at, users(${USER_FIELDS}), buildings(name)`)
     .order('created_at', { ascending: false });
 
   if (building_id) query = query.eq('building_id', building_id);
@@ -179,7 +187,7 @@ exports.adminGetComplaints = async (req, res) => {
 
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json(mapComplaints(data));
 };
 
 // Admin: update any complaint
@@ -199,11 +207,11 @@ exports.adminUpdateComplaint = async (req, res) => {
     .from('complaints')
     .update(updates)
     .eq('id', id)
-    .select('*, users(name, flat_no, wing), buildings(name)')
+    .select(`*, users(${USER_FIELDS}), buildings(name)`)
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
-  res.json({ message: 'Complaint updated', complaint: data });
+  res.json({ message: 'Complaint updated', complaint: mapComplaint(data) });
 };
 
 // Admin: delete a complaint
@@ -223,9 +231,9 @@ exports.adminCreateComplaint = async (req, res) => {
   const { data, error } = await supabase
     .from('complaints')
     .insert({ title: title.trim(), description: description?.trim(), category, photo_url, building_id, user_id: user_id || null })
-    .select('*, users(name, flat_no, wing), buildings(name)')
+    .select(`*, users(${USER_FIELDS}), buildings(name)`)
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json({ message: 'Complaint created', complaint: data });
+  res.status(201).json({ message: 'Complaint created', complaint: mapComplaint(data) });
 };

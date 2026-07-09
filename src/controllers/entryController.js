@@ -1,13 +1,53 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
+const { uploadImage } = require('../utils/imageUploadHelper');
+const { resolveVisitorFlat, parseBuildingWings } = require('../utils/flatMatchHelper');
 
 const PHONE_RE = /^[6-9]\d{9}$/;
 
+async function processVisitorEntryBackground({
+  visitorId,
+  building_id,
+  name,
+  purpose,
+  flat_no,
+  photo_url,
+  flatResidents,
+}) {
+  if (photo_url?.startsWith('data:image')) {
+    try {
+      const uploadRes = await uploadImage(photo_url, {
+        folder: 'visitors',
+        transformation: [{ width: 960, crop: 'limit' }],
+      });
+      await supabase.from('visitors').update({ photo_url: uploadRes.secure_url }).eq('id', visitorId);
+    } catch (err) {
+      console.error('Visitor photo upload failed:', err.message);
+    }
+  } else if (photo_url && !photo_url.startsWith('data:')) {
+    await supabase.from('visitors').update({ photo_url }).eq('id', visitorId);
+  }
+
+  const purposeText = purpose?.trim() || null;
+
+  if (flatResidents.length > 0) {
+    await ns.notifyMembers(
+      building_id,
+      {
+        type: 'visitor',
+        meta: { visitor_id: visitorId, flat_no },
+        build: (lang) => createCopy(lang).visitorAtDoor(name, flat_no, purposeText),
+      },
+      flatResidents.map((r) => r.id),
+    );
+  }
+}
+
 // PUBLIC: visitor self-entry via QR (no auth required)
-// ENHANCED: Notify only specific flat owner, not broadcast to all
 exports.visitorSelfEntry = async (req, res) => {
   const { building_id } = req.params;
-  const { name, mobile, purpose, flat_no, photo_url } = req.body;
+  const { name, mobile, purpose, flat_no, wing, photo_url } = req.body;
 
   if (!name?.trim()) return res.status(422).json({ error: 'Name is required' });
   if (name.trim().length > 100) return res.status(422).json({ error: 'Name must not exceed 100 characters' });
@@ -16,71 +56,65 @@ exports.visitorSelfEntry = async (req, res) => {
   if (!flat_no?.trim()) return res.status(422).json({ error: 'Flat number is required' });
   if (flat_no.trim().length > 20) return res.status(422).json({ error: 'Flat number must not exceed 20 characters' });
   if (purpose && purpose.trim().length > 500) return res.status(422).json({ error: 'Purpose must not exceed 500 characters' });
-
-  const { data: building } = await supabase
-    .from('buildings').select('id, name').eq('id', building_id).single();
-  if (!building) return res.status(404).json({ error: 'Building not found' });
+  if (!photo_url) return res.status(422).json({ error: 'Photo is required' });
 
   try {
-    // Find home owner (user living in this flat)
-    const { data: homeOwner } = await supabase
-      .from('users')
-      .select('id, name, expo_push_token')
-      .eq('building_id', building_id)
-      .eq('flat_no', flat_no.trim())
-      .eq('status', 'approved')
+    const { data: building, error: buildingError } = await supabase
+      .from('buildings')
+      .select('id, name, has_wings, wings')
+      .eq('id', building_id)
       .single();
 
-    // Create visitor entry
+    if (buildingError || !building) return res.status(404).json({ error: 'Building not found' });
+
+    if (building.has_wings && !wing?.trim()) {
+      return res.status(422).json({ error: 'Please select a wing' });
+    }
+
+    const { residents: flatResidents, error: flatError, flatLabel } = await resolveVisitorFlat(
+      supabase,
+      building_id,
+      building,
+      wing,
+      flat_no.trim(),
+    );
+
+    if (flatError) {
+      return res.status(422).json({ error: flatError });
+    }
+
     const { data, error } = await supabase
       .from('visitors')
       .insert({
         building_id,
         name: name.trim(),
         phone: mobile.trim(),
-        purpose: purpose?.trim(),
-        flat_no: flat_no.trim(),
-        photo_url,
+        purpose: purpose?.trim() || null,
+        flat_no: flatLabel,
+        photo_url: null,
         entry_type: 'self',
-        via_qr: true,
-        home_user_id: homeOwner?.id || null
       })
-      .select().single();
+      .select()
+      .single();
 
     if (error) return res.status(400).json({ error: error.message });
 
-    // SMART NOTIFICATION: Notify only the flat owner (not all members)
-    if (homeOwner?.id) {
-      // Notify ONLY this flat owner
-      await ns.notifyUser(homeOwner.id, {
-        title: '🚪 Visitor at Your Door',
-        body: `${name.trim()} is visiting your flat — ${purpose?.trim() || 'No purpose specified'}`,
-        type: 'visitor',
-        meta: { visitor_id: data.id, flat_no: flat_no.trim() }
-      });
-
-      // Log who was notified
-      await supabase
-        .from('visitors')
-        .update({ notified_users: [homeOwner.id] })
-        .eq('id', data.id)
-        .catch(err => console.error('Failed to log notified users:', err));
-    } else {
-      // Fallback: If no flat owner found, notify all pramukhs/admins
-      await ns.notifyPramukh(building_id, {
-        title: '🚪 Visitor Entry - Flat Not Found',
-        body: `${name.trim()} is visiting Flat ${flat_no.trim()} (owner not registered) — ${purpose?.trim() || 'No purpose specified'}`,
-        type: 'visitor',
-        meta: { visitor_id: data.id, flat_no: flat_no.trim() }
-      });
-    }
-
-    res.status(201).json({ 
-      message: 'Entry logged successfully', 
-      visitor: data, 
+    res.status(201).json({
+      message: 'Entry logged successfully',
+      visitor: { ...data, photo_pending: !!photo_url },
       building_name: building.name,
-      notified_flat_owner: !!homeOwner?.id 
+      notified_residents: flatResidents.length,
     });
+
+    processVisitorEntryBackground({
+      visitorId: data.id,
+      building_id,
+      name: name.trim(),
+      purpose: purpose?.trim(),
+      flat_no: flatLabel,
+      photo_url,
+      flatResidents,
+    }).catch((err) => console.error('Visitor entry background error:', err));
   } catch (error) {
     console.error('Visitor self-entry error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -91,17 +125,36 @@ exports.visitorSelfEntry = async (req, res) => {
 exports.getBuildingInfoJson = async (req, res) => {
   const { building_id } = req.params;
   const { data, error } = await supabase
-    .from('buildings').select('id, name, address').eq('id', building_id).single();
+    .from('buildings')
+    .select('id, name, address, has_wings, wings')
+    .eq('id', building_id)
+    .single();
   if (error || !data) return res.status(404).json({ error: 'Building not found' });
-  res.json(data);
+  res.json({
+    ...data,
+    wing_list: parseBuildingWings(data),
+  });
 };
 
 // PUBLIC: serve HTML visitor entry form (opened when QR is scanned)
 exports.getBuildingInfo = async (req, res) => {
   const { building_id } = req.params;
   const { data, error } = await supabase
-    .from('buildings').select('id, name, address').eq('id', building_id).single();
+    .from('buildings')
+    .select('id, name, address, has_wings, wings')
+    .eq('id', building_id)
+    .single();
   if (error || !data) return res.status(404).send('<h2>Building not found</h2>');
+
+  const wingList = parseBuildingWings(data);
+  const hasWings = !!data.has_wings && wingList.length > 0;
+  const wingFieldHtml = hasWings
+    ? `<label>Select Wing <span>*</span></label>
+      <select id="wing">
+        <option value="">Choose wing</option>
+        ${wingList.map((w) => `<option value="${String(w).replace(/"/g, '&quot;')}">${String(w).replace(/</g, '&lt;')}</option>`).join('')}
+      </select>`
+    : '';
 
   const backendUrl = process.env.NODE_ENV === 'production'
     ? (process.env.BACKEND_URL || '')
@@ -124,8 +177,8 @@ exports.getBuildingInfo = async (req, res) => {
     .card { background: #fff; border-radius: 20px; padding: 24px 20px; max-width: 480px; margin: 0 auto; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
     label { display: block; font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 6px; margin-top: 16px; }
     label span { color: #EF4444; }
-    input, textarea { width: 100%; border: 1.5px solid #D1D5DB; border-radius: 10px; padding: 12px 14px; font-size: 15px; color: #111827; background: #F9FAFB; outline: none; transition: border-color 0.2s; }
-    input:focus, textarea:focus { border-color: #1E3A8A; background: #fff; }
+    input, textarea, select { width: 100%; border: 1.5px solid #D1D5DB; border-radius: 10px; padding: 12px 14px; font-size: 15px; color: #111827; background: #F9FAFB; outline: none; transition: border-color 0.2s; }
+    input:focus, textarea:focus, select:focus { border-color: #1E3A8A; background: #fff; }
     textarea { height: 80px; resize: none; }
     .photo-btn { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; border: 1.5px dashed #1E3A8A; border-radius: 12px; padding: 14px; background: #EFF6FF; color: #1E3A8A; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 4px; }
     .photo-preview { width: 100%; max-height: 220px; object-fit: cover; border-radius: 12px; margin-top: 12px; display: none; }
@@ -152,8 +205,10 @@ exports.getBuildingInfo = async (req, res) => {
       <label>Mobile Number <span>*</span></label>
       <input id="mobile" type="tel" placeholder="10-digit mobile number" maxlength="10" inputmode="numeric" />
 
-      <label>Visiting Flat No <span>*</span></label>
-      <input id="flat_no" type="text" placeholder="e.g. A-101" autocomplete="off" />
+      ${wingFieldHtml}
+
+      <label>${hasWings ? 'Flat Number' : 'Visiting Flat No'} <span>*</span></label>
+      <input id="flat_no" type="text" placeholder="e.g. 101" autocomplete="off" />
 
       <label>Purpose of Visit</label>
       <textarea id="purpose" placeholder="e.g. Delivery, Meeting, Repair work..."></textarea>
@@ -173,24 +228,42 @@ exports.getBuildingInfo = async (req, res) => {
   <div class="success-screen" id="successView">
     <div class="tick">✅</div>
     <h2>Entry Registered!</h2>
-    <p>Your visit to <strong>${data.name}</strong> has been recorded.<br/>The residents have been notified.</p>
+    <p>Your visit to <strong>${data.name}</strong> has been recorded.<br/>The flat resident has been notified.</p>
   </div>
 
   <script>
     var photoBase64 = null;
 
+    var hasWings = ${hasWings ? 'true' : 'false'};
+
+    function compressImage(file, maxWidth, quality, callback) {
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        var img = new Image();
+        img.onload = function() {
+          var w = img.width, h = img.height;
+          if (w > maxWidth) { h = Math.round(h * maxWidth / w); w = maxWidth; }
+          var canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          callback(canvas.toDataURL('image/jpeg', quality));
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
     function previewPhoto(input) {
       var file = input.files[0];
       if (!file) return;
-      document.getElementById('photoLabel').textContent = 'Photo selected ✓';
-      var reader = new FileReader();
-      reader.onload = function(e) {
-        photoBase64 = e.target.result;
+      document.getElementById('photoLabel').textContent = 'Processing photo...';
+      compressImage(file, 960, 0.75, function(dataUrl) {
+        photoBase64 = dataUrl;
+        document.getElementById('photoLabel').textContent = 'Photo selected ✓';
         var img = document.getElementById('photoPreview');
         img.src = photoBase64;
         img.style.display = 'block';
-      };
-      reader.readAsDataURL(file);
+      });
     }
 
     function showError(msg) {
@@ -209,9 +282,11 @@ exports.getBuildingInfo = async (req, res) => {
       var mobile = document.getElementById('mobile').value.trim();
       var flat_no = document.getElementById('flat_no').value.trim();
       var purpose = document.getElementById('purpose').value.trim();
+      var wing = hasWings ? (document.getElementById('wing').value || '').trim() : '';
 
       if (!name) return showError('Full name is required');
       if (!mobile || !/^[6-9]\\d{9}$/.test(mobile)) return showError('Enter a valid 10-digit mobile number');
+      if (hasWings && !wing) return showError('Please select a wing');
       if (!flat_no) return showError('Flat number is required');
       if (!photoBase64) return showError('Please take or upload a photo');
 
@@ -219,10 +294,13 @@ exports.getBuildingInfo = async (req, res) => {
       btn.disabled = true;
       btn.textContent = 'Submitting...';
 
+      var payload = { name: name, mobile: mobile, flat_no: flat_no, purpose: purpose, photo_url: photoBase64 };
+      if (hasWings) payload.wing = wing;
+
       fetch('${backendUrl}/entry/building/${building_id}', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name, mobile: mobile, flat_no: flat_no, purpose: purpose, photo_url: photoBase64 })
+        body: JSON.stringify(payload)
       })
       .then(function(r) { return r.json(); })
       .then(function(data) {
