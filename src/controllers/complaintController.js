@@ -170,6 +170,21 @@ exports.updateComplaintStatus = async (req, res) => {
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
+
+  // Same pattern as createComplaint — in-app + push to all approved members
+  const { data: updater } = await supabase
+    .from('users')
+    .select('name, email')
+    .eq('id', req.user.id)
+    .single();
+  const updaterName = userDisplayName(updater || req.user, 'Pramukh');
+
+  await ns.notifyMembers(data.building_id, {
+    type: 'complaint',
+    meta: { complaint_id: data.id, status },
+    build: (lang) => createCopy(lang).complaintStatusUpdate(data.title, status, updaterName),
+  });
+
   res.json({ message: 'Status updated', complaint: mapComplaint(data) });
 };
 
@@ -211,6 +226,22 @@ exports.adminUpdateComplaint = async (req, res) => {
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
+
+  if (status && data?.building_id) {
+    const { data: updater } = await supabase
+      .from('users')
+      .select('name, email')
+      .eq('id', req.user.id)
+      .single();
+    const updaterName = userDisplayName(updater || req.user, 'Admin');
+
+    await ns.notifyMembers(data.building_id, {
+      type: 'complaint',
+      meta: { complaint_id: data.id, status },
+      build: (lang) => createCopy(lang).complaintStatusUpdate(data.title, status, updaterName),
+    });
+  }
+
   res.json({ message: 'Complaint updated', complaint: mapComplaint(data) });
 };
 

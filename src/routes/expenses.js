@@ -8,6 +8,7 @@ router.get('/wings', authenticate, c.getWings);
 // All authenticated users can view
 router.get('/summary', authenticate, c.getFundSummary);
 router.get('/entries', authenticate, c.getEntries);
+router.get('/export', authenticate, c.exportEntries);
 
 // Pramukh + admin can manage
 router.post('/opening-balance', authenticate, requireRole('pramukh', 'admin'), c.setOpeningBalance);

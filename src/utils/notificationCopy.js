@@ -80,7 +80,9 @@ function createCopy(lang) {
 
   const t = {
     en: {
-      announcementPreview: 'Tap to read the full announcement.',
+      announcementTitle: 'New announcement added',
+      announcementUrgentTitle: 'Urgent: New announcement added',
+      announcementBody: (title, body, by) => `${title}: ${body} — by ${by}`,
       maintenanceTitle: '🧾 New Maintenance Bill',
       maintenanceBody: (period, amt, due) => `Your ${period} maintenance bill is ${amt}. Due date: ${due}.`,
       maintenancePenalty: (period, amt, due, pen) => `Your ${period} bill is ${amt}. Please pay by ${due} to avoid a ${pen} late fee.`,
@@ -126,6 +128,11 @@ function createCopy(lang) {
       complaintTitle: '📣 New Society Complaint',
       complaintBodyFlat: (name, flat, title) => `${name} (${flat}) raised: ${title}`,
       complaintBody: (name, title) => `${name} raised a complaint: ${title}`,
+      complaintStatusTitle: 'Complaint status updated',
+      complaintStatusBody: (title, status, by) => `"${title}" is now ${status} — by ${by}`,
+      expenseInflowTitle: 'New inflow added',
+      expenseOutflowTitle: 'New outflow added',
+      expenseBody: (amt, desc, by) => `${amt}: ${desc} — by ${by}`,
       parkingReportTitle: '🚗 Parking Issue Reported',
       parkingReportBodyV: (name, desc, v) => `${name} reported a parking problem${desc} (${v}).`,
       parkingReportBody: (name, desc) => `${name} reported a parking issue${desc}.`,
@@ -146,11 +153,11 @@ function createCopy(lang) {
       supportUserReplyBody: (name, subject) => `${name} replied on "${subject}".`,
       supportStatusTitle: '📋 Ticket Status Updated',
       supportStatusBody: (subject, status) => `Your request "${subject}" is now ${status}.`,
-      urgentPrefix: '🚨 Urgent: ',
-      announcePrefix: '📢 ',
     },
     hi: {
-      announcementPreview: 'पूरी घोषणा पढ़ने के लिए टैप करें।',
+      announcementTitle: 'नई घोषणा जोड़ी गई',
+      announcementUrgentTitle: 'जरूरी: नई घोषणा जोड़ी गई',
+      announcementBody: (title, body, by) => `${title}: ${body} — द्वारा ${by}`,
       maintenanceTitle: '🧾 नया रखरखाव बिल',
       maintenanceBody: (period, amt, due) => `आपका ${period} का रखरखाव बिल ${amt} है। अंतिम तिथि: ${due}।`,
       maintenancePenalty: (period, amt, due, pen) => `आपका ${period} का बिल ${amt} है। ${due} तक भुगतान करें, नहीं तो ${pen} विलंब शुल्क लगेगा।`,
@@ -196,6 +203,11 @@ function createCopy(lang) {
       complaintTitle: '📣 नई शिकायत',
       complaintBodyFlat: (name, flat, title) => `${name} (${flat}) ने शिकायत दर्ज की: ${title}`,
       complaintBody: (name, title) => `${name} ने शिकायत दर्ज की: ${title}`,
+      complaintStatusTitle: 'शिकायत की स्थिति अपडेट',
+      complaintStatusBody: (title, status, by) => `"${title}" अब ${status} है — द्वारा ${by}`,
+      expenseInflowTitle: 'नई आमदनी जोड़ी गई',
+      expenseOutflowTitle: 'नया खर्च जोड़ा गया',
+      expenseBody: (amt, desc, by) => `${amt}: ${desc} — द्वारा ${by}`,
       parkingReportTitle: '🚗 पार्किंग समस्या',
       parkingReportBodyV: (name, desc, v) => `${name} ने पार्किंग की समस्या बताई${desc} (${v})।`,
       parkingReportBody: (name, desc) => `${name} ने पार्किंग की समस्या बताई${desc}।`,
@@ -216,11 +228,11 @@ function createCopy(lang) {
       supportUserReplyBody: (name, subject) => `${name} ने "${subject}" पर जवाब दिया।`,
       supportStatusTitle: '📋 टिकट स्थिति अपडेट',
       supportStatusBody: (subject, status) => `आपका अनुरोध "${subject}" अब ${status} है।`,
-      urgentPrefix: '🚨 जरूरी: ',
-      announcePrefix: '📢 ',
     },
     gu: {
-      announcementPreview: 'સંપૂર્ણ જાહેરાત વાંચવા ટૅપ કરો.',
+      announcementTitle: 'નવી જાહેરાત ઉમેરાઈ',
+      announcementUrgentTitle: 'તાત્કાલિક: નવી જાહેરાત ઉમેરાઈ',
+      announcementBody: (title, body, by) => `${title}: ${body} — દ્વારા ${by}`,
       maintenanceTitle: '🧾 નવું જાળવણી બિલ',
       maintenanceBody: (period, amt, due) => `તમારું ${period} જાળવણી બિલ ${amt} છે. અંતિમ તારીખ: ${due}.`,
       maintenancePenalty: (period, amt, due, pen) => `તમારું ${period} બિલ ${amt} છે. ${due} સુધી ચૂકવો, નહીંતર ${pen} વિલંબ શુલ્ક.`,
@@ -266,6 +278,11 @@ function createCopy(lang) {
       complaintTitle: '📣 નવી ફરિયાદ',
       complaintBodyFlat: (name, flat, title) => `${name} (${flat}) એ ફરિયાદ નોંધાવી: ${title}`,
       complaintBody: (name, title) => `${name} એ ફરિયાદ નોંધાવી: ${title}`,
+      complaintStatusTitle: 'ફરિયાદ સ્થિતિ અપડેટ',
+      complaintStatusBody: (title, status, by) => `"${title}" હવે ${status} છે — દ્વારા ${by}`,
+      expenseInflowTitle: 'નવી આવક ઉમેરાઈ',
+      expenseOutflowTitle: 'નવો ખર્ચ ઉમેરાયો',
+      expenseBody: (amt, desc, by) => `${amt}: ${desc} — દ્વારા ${by}`,
       parkingReportTitle: '🚗 પાર્કિંગ સમસ્યા',
       parkingReportBodyV: (name, desc, v) => `${name} એ પાર્કિંગ સમસ્યા જણાવી${desc} (${v}).`,
       parkingReportBody: (name, desc) => `${name} એ પાર્કિંગ સમસ્યા જણાવી${desc}.`,
@@ -286,8 +303,6 @@ function createCopy(lang) {
       supportUserReplyBody: (name, subject) => `${name} એ "${subject}" પર જવાબ આપ્યો.`,
       supportStatusTitle: '📋 ટિકિટ સ્થિતિ અપડેટ',
       supportStatusBody: (subject, status) => `તમારી વિનંતી "${subject}" હવે ${status} છે.`,
-      urgentPrefix: '🚨 તાત્કાલિક: ',
-      announcePrefix: '📢 ',
     },
   }[L];
 
@@ -299,9 +314,9 @@ function createCopy(lang) {
     preview,
     rupees,
 
-    announcement: (title, body, urgent) => ({
-      title: urgent ? `${t.urgentPrefix}${title}` : `${t.announcePrefix}${title}`,
-      body: preview(body) || t.announcementPreview,
+    announcement: (title, body, urgent, byName) => ({
+      title: urgent ? t.announcementUrgentTitle : t.announcementTitle,
+      body: t.announcementBody(title, preview(body), byName || 'Pramukh'),
     }),
 
     maintenanceBill: (amount, month, year, dueDate, penalty) => {
@@ -407,6 +422,16 @@ function createCopy(lang) {
       body: flatLabel
         ? t.complaintBodyFlat(residentName, flatLabel, complaintTitle)
         : t.complaintBody(residentName, complaintTitle),
+    }),
+
+    complaintStatusUpdate: (complaintTitle, status, byName) => ({
+      title: t.complaintStatusTitle,
+      body: t.complaintStatusBody(complaintTitle, statusLabel(status), byName || 'Pramukh'),
+    }),
+
+    expenseEntry: (type, amount, description, byName) => ({
+      title: type === 'inflow' ? t.expenseInflowTitle : t.expenseOutflowTitle,
+      body: t.expenseBody(rupees(amount), preview(description, 80), byName || 'Pramukh'),
     }),
 
     parkingReport: (reporterName, description, vehicleNumber) => {
