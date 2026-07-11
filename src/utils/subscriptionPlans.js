@@ -3,25 +3,34 @@ const supabase = require('../supabase');
 /** Used when `subscription_plans` is empty or a slug is missing (safe fallback). */
 const FALLBACK_PLANS = {
   monthly: {
-    amount_paise: 1500,
+    amount_paise: 1000, // ₹10 (was ₹15)
     months: 1,
     allow_newspaper_addon: true,
     newspaper_addon_paise: 300,
+    platform_fee_paise: 0,
+    other_fee_paise: 0,
     title: 'Monthly Plan',
+    compare_at_paise: 1500,
   },
   yearly: {
-    amount_paise: 18000,
+    amount_paise: 12000, // ₹120 (was ₹180)
     months: 12,
     allow_newspaper_addon: true,
     newspaper_addon_paise: 3600,
+    platform_fee_paise: 0,
+    other_fee_paise: 0,
     title: 'Yearly Plan',
+    compare_at_paise: 18000,
   },
   lifetime: {
     amount_paise: 150000,
     months: null,
     allow_newspaper_addon: false,
     newspaper_addon_paise: null,
+    platform_fee_paise: 0,
+    other_fee_paise: 0,
     title: 'Lifetime Plan',
+    compare_at_paise: null,
   },
 };
 
@@ -30,6 +39,20 @@ function normalizeFeatures(row) {
   if (Array.isArray(f)) return f;
   if (f && typeof f === 'object') return Object.values(f);
   return [];
+}
+
+/** Non-negative paise integer; empty/invalid → 0. */
+function parseFeePaise(value) {
+  if (value == null || value === '') return 0;
+  const n = parseInt(value, 10);
+  if (Number.isNaN(n) || n < 0) return 0;
+  return n;
+}
+
+/** Platform + other fees for a plan row / payment info. */
+function checkoutExtraFeesPaise(planInfo) {
+  if (!planInfo) return 0;
+  return parseFeePaise(planInfo.platform_fee_paise) + parseFeePaise(planInfo.other_fee_paise);
 }
 
 /**
@@ -57,6 +80,8 @@ async function getPlanForPayment(slug) {
       months: row.months,
       allow_newspaper_addon: !!row.allow_newspaper_addon,
       newspaper_addon_paise: row.newspaper_addon_paise,
+      platform_fee_paise: parseFeePaise(row.platform_fee_paise),
+      other_fee_paise: parseFeePaise(row.other_fee_paise),
       title: row.title,
     };
   }
@@ -89,6 +114,9 @@ async function listPublicPlans() {
       months: v.months,
       allow_newspaper_addon: v.allow_newspaper_addon,
       newspaper_addon_paise: v.newspaper_addon_paise,
+      platform_fee_paise: v.platform_fee_paise,
+      other_fee_paise: v.other_fee_paise,
+      compare_at_paise: v.compare_at_paise ?? null,
       sort_order: i + 1,
       features: [
         'Full access to all modules',
@@ -106,8 +134,15 @@ async function listPublicPlans() {
     'Complaints & announcements',
   ];
 
+  /** Default MRP for classic plans when DB has no compare_at column yet. */
+  const defaultCompareAt = { monthly: 1500, yearly: 18000 };
+
   return data.map((row) => {
     const features = normalizeFeatures(row);
+    const compareAt =
+      row.compare_at_paise != null
+        ? parseFeePaise(row.compare_at_paise)
+        : (defaultCompareAt[row.slug] ?? null);
     return {
       id: row.id,
       slug: row.slug,
@@ -117,6 +152,9 @@ async function listPublicPlans() {
       months: row.months,
       allow_newspaper_addon: !!row.allow_newspaper_addon,
       newspaper_addon_paise: row.newspaper_addon_paise,
+      platform_fee_paise: parseFeePaise(row.platform_fee_paise),
+      other_fee_paise: parseFeePaise(row.other_fee_paise),
+      compare_at_paise: compareAt && compareAt > row.amount_paise ? compareAt : null,
       sort_order: row.sort_order,
       features: features.length ? features : defaults,
     };
@@ -125,6 +163,8 @@ async function listPublicPlans() {
 
 module.exports = {
   FALLBACK_PLANS,
+  parseFeePaise,
+  checkoutExtraFeesPaise,
   getPlanRowFromDb,
   getPlanForPayment,
   getPlanRupeeBase,

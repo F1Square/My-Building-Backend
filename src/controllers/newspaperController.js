@@ -76,18 +76,8 @@ exports.getEdition = async (req, res) => {
     });
   }
 
-  // Fall back to URL pattern
-  const { data: pattern } = await supabase
-    .from('newspaper_url_patterns')
-    .select('url_pattern')
-    .eq('language', language)
-    .maybeSingle();
-
-  if (pattern?.url_pattern) {
-    const url = pattern.url_pattern.replace('{date}', date);
-    return res.json({ url, source: 'pattern', kind: 'external', date, language });
-  }
-
+  // No edition for this date + language — do not fall back to URL patterns.
+  // Each language tab must only show its own uploaded PDF (or empty).
   res.status(404).json({ error: 'not_available' });
 };
 

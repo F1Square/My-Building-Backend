@@ -1,6 +1,5 @@
 const supabase = require('../supabase');
 const crypto = require('crypto');
-const { getPlanRupeeBase } = require('../utils/subscriptionPlans');
 
 // Generate a random uppercase code like "SAVE20" or "FLAT150"
 function generateCode(prefix = '') {
@@ -81,7 +80,11 @@ exports.validatePromo = async (req, res) => {
     return res.status(400).json({ error: 'This promo code has expired' });
 
   // Calculate discounted amount for the plan (rupees — matches promoController expectations)
-  const original = await getPlanRupeeBase(plan);
+  const { getPlanForPayment, checkoutExtraFeesPaise } = require('../utils/subscriptionPlans');
+  const planInfo = await getPlanForPayment(plan);
+  if (!planInfo) return res.status(422).json({ error: 'Invalid or inactive plan' });
+
+  const original = Math.max(0, Math.round(planInfo.amount_paise / 100));
   let discount = 0;
   if (promo.type === 'percent') {
     discount = Math.round((original * promo.value) / 100);
@@ -89,6 +92,9 @@ exports.validatePromo = async (req, res) => {
     discount = Math.min(promo.value, original);
   }
   const final = Math.max(1, original - discount);
+  const platformFee = Math.round(Number(planInfo.platform_fee_paise || 0) / 100);
+  const otherFee = Math.round(Number(planInfo.other_fee_paise || 0) / 100);
+  const fees = Math.round(checkoutExtraFeesPaise(planInfo) / 100);
 
   res.json({
     valid: true,
@@ -100,6 +106,10 @@ exports.validatePromo = async (req, res) => {
     original_amount: original,
     discount_amount: discount,
     final_amount: final,
+    platform_fee: platformFee,
+    other_fee: otherFee,
+    /** Discounted plan + fees (newspaper add-on applied on client / createOrder). */
+    payable_amount: final + fees,
   });
 };
 

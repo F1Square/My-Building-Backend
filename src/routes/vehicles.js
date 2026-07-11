@@ -4,6 +4,7 @@ const c = require('../controllers/vehicleController');
 
 router.post('/', authenticate, requireRole('user', 'pramukh'), c.addVehicle);
 router.get('/mine', authenticate, requireRole('user', 'pramukh'), c.getMyVehicles);
+router.patch('/:id', authenticate, requireRole('user', 'pramukh'), c.updateVehicle);
 router.delete('/:id', authenticate, requireRole('user', 'pramukh'), c.deleteVehicle);
 router.get('/building', authenticate, requireRole('pramukh', 'admin', 'user'), c.getBuildingVehicles);
 router.post('/report', authenticate, requireRole('user', 'pramukh', 'admin'), c.reportParking);

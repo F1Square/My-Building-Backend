@@ -22,6 +22,7 @@ router.get('/all', authenticate, requireRole('admin'), c.adminGetAll);
 router.post('/grant', authenticate, requireRole('admin'), c.adminGrant);
 router.post('/grant-newspaper', authenticate, requireRole('admin'), c.adminGrantNewspaper);
 router.post('/revoke', authenticate, requireRole('admin'), c.adminRevoke);
+router.post('/cancel', authenticate, requireRole('user', 'pramukh'), c.cancelMySubscription);
 
 // Newspaper add-on toggle (existing subscribers)
 router.post('/newspaper-addon', authenticate, requireRole('user', 'pramukh'), c.toggleNewspaperAddon);

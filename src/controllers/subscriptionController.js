@@ -5,6 +5,8 @@ const {
   getPlanForPayment,
   getPlanRupeeBase,
   listPublicPlans,
+  parseFeePaise,
+  checkoutExtraFeesPaise,
 } = require('../utils/subscriptionPlans');
 
 // Get current user's subscription
@@ -46,7 +48,9 @@ exports.adminListPlans = async (req, res) => {
 exports.adminCreatePlan = async (req, res) => {
   const {
     slug, title, description, amount_paise, months,
-    allow_newspaper_addon, newspaper_addon_paise, sort_order, features, is_active,
+    allow_newspaper_addon, newspaper_addon_paise,
+    platform_fee_paise, other_fee_paise,
+    sort_order, features, is_active,
   } = req.body;
 
   if (!slug?.trim() || !title?.trim() || amount_paise == null) {
@@ -78,6 +82,8 @@ exports.adminCreatePlan = async (req, res) => {
           const n = parseInt(newspaper_addon_paise, 10);
           return Number.isNaN(n) ? null : n;
         })(),
+    platform_fee_paise: parseFeePaise(platform_fee_paise),
+    other_fee_paise: parseFeePaise(other_fee_paise),
     sort_order: sort_order == null ? 0 : parseInt(sort_order, 10) || 0,
     is_active: is_active !== false,
     features: Array.isArray(features) ? features : [],
@@ -92,7 +98,9 @@ exports.adminUpdatePlan = async (req, res) => {
   const { id } = req.params;
   const {
     slug, title, description, amount_paise, months,
-    allow_newspaper_addon, newspaper_addon_paise, sort_order, features, is_active,
+    allow_newspaper_addon, newspaper_addon_paise,
+    platform_fee_paise, other_fee_paise,
+    sort_order, features, is_active,
   } = req.body;
 
   const patch = {};
@@ -126,6 +134,8 @@ exports.adminUpdatePlan = async (req, res) => {
   if (newspaper_addon_paise !== undefined) {
     patch.newspaper_addon_paise = newspaper_addon_paise == null ? null : parseInt(newspaper_addon_paise, 10);
   }
+  if (platform_fee_paise !== undefined) patch.platform_fee_paise = parseFeePaise(platform_fee_paise);
+  if (other_fee_paise !== undefined) patch.other_fee_paise = parseFeePaise(other_fee_paise);
   if (sort_order != null) patch.sort_order = parseInt(sort_order, 10) || 0;
   if (is_active !== undefined) patch.is_active = !!is_active;
   if (features !== undefined) patch.features = Array.isArray(features) ? features : [];
@@ -173,7 +183,7 @@ exports.createOrder = async (req, res) => {
   }
   let appliedPromo = null;
 
-  // Apply promo discount if provided
+  // Apply promo discount if provided (on plan + newspaper; fees added after)
   if (promo_id) {
     const { data: promo } = await supabase
       .from('promo_codes').select('*').eq('id', promo_id).single();
@@ -189,6 +199,9 @@ exports.createOrder = async (req, res) => {
       return res.status(400).json({ error: 'This promo code has expired' });
     }
   }
+
+  // Platform + other fees (always charged at checkout when configured on the plan)
+  amount += checkoutExtraFeesPaise(planInfo);
 
   try {
     const { initiatePayment } = require('../utils/easebuzzHelper');
@@ -324,6 +337,30 @@ exports.adminRevoke = async (req, res) => {
     .from('subscriptions').update({ status: 'cancelled', newspaper_addon: false }).eq('user_id', user_id);
   if (error) return res.status(400).json({ error: error.message });
   res.json({ message: 'Subscription and newspaper addon revoked' });
+};
+
+/** User/Pramukh: cancel own plan + newspaper add-on (no refund). */
+exports.cancelMySubscription = async (req, res) => {
+  const userId = req.user.id;
+  const { data: sub, error: findErr } = await supabase
+    .from('subscriptions')
+    .select('id, status')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (findErr) return res.status(400).json({ error: findErr.message });
+  if (!sub) return res.status(404).json({ error: 'No subscription found' });
+  if (sub.status !== 'active') {
+    return res.status(400).json({ error: 'No active subscription to disable' });
+  }
+
+  const { error } = await supabase
+    .from('subscriptions')
+    .update({ status: 'cancelled', newspaper_addon: false })
+    .eq('user_id', userId);
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({ message: 'Subscription and newspaper plan disabled', status: 'cancelled', newspaper_addon: false });
 };
 
 // Admin: list subscriptions with user details (search + pagination for large directories)

@@ -61,9 +61,49 @@ async function adjustBalance(building_id, wing = 'Building-Wide', delta) {
   const newBalance = current + delta;
 
   await supabase.from('society_funds')
-    .upsert({ building_id, wing, current_balance: newBalance, updated_at: new Date().toISOString() }, { onConflict: 'building_id,wing' });
+    .upsert({ building_id, wing, current_balance: newBalance }, { onConflict: 'building_id,wing' });
 
   return newBalance;
+}
+
+/** Calendar date YYYY-MM-DD in Asia/Kolkata (app is India-focused). */
+function istDateString(d = new Date()) {
+  return new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+function normalizeEntryDate(date) {
+  if (!date) return istDateString();
+  const m = String(date).match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : istDateString();
+}
+
+/**
+ * Min allowed entry date when opening balance exists.
+ * Prefer opening_balance_as_of; fall back to fund created_at (IST).
+ */
+function openingBalanceMinDate(fund) {
+  if (!fund || fund.opening_balance === null || fund.opening_balance === undefined) return null;
+  if (fund.opening_balance_as_of) return String(fund.opening_balance_as_of).slice(0, 10);
+  if (fund.created_at) return istDateString(fund.created_at);
+  return null;
+}
+
+async function assertEntryDateAllowed(building_id, wing, entryDate) {
+  const dateOnly = normalizeEntryDate(entryDate);
+  const { data: fund } = await supabase
+    .from('society_funds')
+    .select('*')
+    .eq('building_id', building_id)
+    .eq('wing', wing)
+    .maybeSingle();
+
+  const minDate = openingBalanceMinDate(fund);
+  if (minDate && dateOnly < minDate) {
+    return {
+      error: `Entry date cannot be before opening balance date (${minDate}). Opening balance was set on that day.`,
+    };
+  }
+  return { dateOnly };
 }
 
 // ── Get fund summary (balance + opening) ─────────────────────────────────────
@@ -85,7 +125,12 @@ exports.getFundSummary = async (req, res) => {
     .eq('wing', wing)
     .single();
 
-  res.json(data || { building_id, wing, opening_balance: null, current_balance: 0 });
+  if (!data) {
+    return res.json({ building_id, wing, opening_balance: null, current_balance: 0, opening_balance_as_of: null });
+  }
+
+  const asOf = openingBalanceMinDate(data);
+  res.json({ ...data, opening_balance_as_of: asOf });
 };
 
 // ── Set opening balance (pramukh first-time setup or admin) ──────────────────
@@ -104,8 +149,13 @@ exports.setOpeningBalance = async (req, res) => {
   if (isNaN(parsed) || parsed < 0) return res.status(422).json({ error: 'Amount must be a valid non-negative number' });
 
   const { data: existing } = await supabase
-    .from('society_funds').select('id').eq('building_id', building_id).eq('wing', wing).single();
+    .from('society_funds')
+    .select('*')
+    .eq('building_id', building_id)
+    .eq('wing', wing)
+    .single();
 
+  const today = istDateString();
   const payload = {
     building_id,
     wing,
@@ -114,12 +164,26 @@ exports.setOpeningBalance = async (req, res) => {
     updated_at: new Date().toISOString(),
     set_by: req.user.id,
   };
+  // Stamp as-of only the first time opening balance is set
+  if (!existing?.opening_balance_as_of && (existing?.opening_balance === null || existing?.opening_balance === undefined || !existing)) {
+    payload.opening_balance_as_of = today;
+  }
 
   let error;
   if (existing) {
     ({ error } = await supabase.from('society_funds').update(payload).eq('building_id', building_id).eq('wing', wing));
+    // Column may not exist yet — retry without as-of
+    if (error && String(error.message || '').includes('opening_balance_as_of')) {
+      delete payload.opening_balance_as_of;
+      ({ error } = await supabase.from('society_funds').update(payload).eq('building_id', building_id).eq('wing', wing));
+    }
   } else {
+    payload.opening_balance_as_of = today;
     ({ error } = await supabase.from('society_funds').insert(payload));
+    if (error && String(error.message || '').includes('opening_balance_as_of')) {
+      delete payload.opening_balance_as_of;
+      ({ error } = await supabase.from('society_funds').insert(payload));
+    }
   }
 
   if (error) return res.status(400).json({ error: error.message });
@@ -131,11 +195,15 @@ exports.setOpeningBalance = async (req, res) => {
     balance += e.type === 'inflow' ? parseFloat(e.amount) : -parseFloat(e.amount);
   });
   await supabase.from('society_funds')
-    .update({ current_balance: balance, updated_at: new Date().toISOString() })
+    .update({ current_balance: balance })
     .eq('building_id', building_id)
     .eq('wing', wing);
 
-  res.json({ message: 'Opening balance set', current_balance: balance });
+  res.json({
+    message: 'Opening balance set',
+    current_balance: balance,
+    opening_balance_as_of: payload.opening_balance_as_of || existing?.opening_balance_as_of || today,
+  });
 };
 
 // ── Get expense entries ───────────────────────────────────────────────────────
@@ -186,7 +254,9 @@ exports.addEntry = async (req, res) => {
   if (!description?.trim()) return res.status(422).json({ error: 'Description is required' });
   if (description.trim().length > 300) return res.status(422).json({ error: 'Description must not exceed 300 characters' });
 
-  const entryDate = date || new Date().toISOString().slice(0, 10);
+  const dateCheck = await assertEntryDateAllowed(building_id, wing, date);
+  if (dateCheck.error) return res.status(422).json({ error: dateCheck.error });
+  const entryDate = dateCheck.dateOnly;
 
   const { data, error } = await supabase
     .from('expense_entries')
@@ -265,6 +335,10 @@ exports.editEntry = async (req, res) => {
     const m = String(date).match(/^(\d{4}-\d{2}-\d{2})/);
     updates.date = m ? m[1] : date;
   }
+
+  const effectiveDate = updates.date || original.date;
+  const dateCheck = await assertEntryDateAllowed(original.building_id, original.wing || wing, effectiveDate);
+  if (dateCheck.error) return res.status(422).json({ error: dateCheck.error });
 
   const { data, error } = await supabase
     .from('expense_entries')
