@@ -47,12 +47,14 @@ exports.getEdition = async (req, res) => {
   if (req.user.role !== 'admin') {
     const { data: sub } = await supabase
       .from('subscriptions')
-      .select('newspaper_addon, status, expires_at')
+      .select('newspaper_addon, newspaper_expires_at, status, expires_at')
       .eq('user_id', req.user.id)
       .single();
 
     const isActive = sub?.status === 'active' && (!sub.expires_at || new Date(sub.expires_at) > new Date());
-    if (!isActive || !sub?.newspaper_addon) {
+    const newsOk = !!sub?.newspaper_addon
+      && (!sub.newspaper_expires_at || new Date(sub.newspaper_expires_at) > new Date());
+    if (!isActive || !newsOk) {
       return res.status(403).json({ error: 'newspaper_addon_required' });
     }
   }

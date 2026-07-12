@@ -9,6 +9,19 @@ const {
   checkoutExtraFeesPaise,
 } = require('../utils/subscriptionPlans');
 
+/** Admin/paid newspaper term → expiry ISO. */
+function newspaperExpiresAtFromTerm(term, fromDate = new Date()) {
+  const d = new Date(fromDate);
+  if (term === 'yearly') d.setFullYear(d.getFullYear() + 1);
+  else d.setMonth(d.getMonth() + 1);
+  return d.toISOString();
+}
+
+function newspaperTermFromPlan(planSlug, planCfg) {
+  if (planSlug === 'yearly' || planCfg?.months === 12) return 'yearly';
+  return 'monthly';
+}
+
 // Get current user's subscription
 exports.getMySubscription = async (req, res) => {
   const { data } = await supabase
@@ -248,15 +261,24 @@ exports.createOrder = async (req, res) => {
 
 // Admin: grant free subscription manually
 exports.adminGrant = async (req, res) => {
-  const { user_id, plan, months, remark, include_newspaper } = req.body;
+  const { user_id, plan, months, remark, include_newspaper, newspaper_term } = req.body;
   const planCfg = await getPlanForPayment(plan);
   if (!user_id || !planCfg) return res.status(422).json({ error: 'user_id and valid active plan slug required' });
   if (months !== undefined && (isNaN(Number(months)) || Number(months) < 1 || Number(months) > 120))
     return res.status(422).json({ error: 'months must be between 1 and 120' });
 
   const wantsNewspaper = !!include_newspaper;
-  if (wantsNewspaper && !planCfg.allow_newspaper_addon) {
+  const isLifetime = planCfg.months == null;
+  // Lifetime has no paid newspaper SKU; admin may still grant monthly/yearly newspaper access.
+  if (wantsNewspaper && !planCfg.allow_newspaper_addon && !isLifetime) {
     return res.status(400).json({ error: 'Newspaper add-on is not available for this plan' });
+  }
+  let newsTerm = null;
+  if (wantsNewspaper && isLifetime) {
+    newsTerm = newspaper_term === 'yearly' ? 'yearly' : newspaper_term === 'monthly' ? 'monthly' : null;
+    if (!newsTerm) {
+      return res.status(422).json({ error: 'Select monthly or yearly newspaper add-on for lifetime grants' });
+    }
   }
 
   const now = new Date();
@@ -265,14 +287,28 @@ exports.adminGrant = async (req, res) => {
     : new Date(now.getFullYear(), now.getMonth() + termMonths, now.getDate()).toISOString();
 
   const { data: existing } = await supabase
-    .from('subscriptions').select('id, newspaper_addon').eq('user_id', user_id).single();
+    .from('subscriptions').select('id, newspaper_addon, newspaper_expires_at').eq('user_id', user_id).single();
+
+  let grantRemark = remark?.trim() || null;
+  if (wantsNewspaper && newsTerm) {
+    const newsNote = `Newspaper add-on (${newsTerm})`;
+    grantRemark = grantRemark ? `${grantRemark} | ${newsNote}` : newsNote;
+  }
+
+  let newspaper_expires_at = existing?.newspaper_expires_at ?? null;
+  if (wantsNewspaper) {
+    newspaper_expires_at = newsTerm
+      ? newspaperExpiresAtFromTerm(newsTerm)
+      : (expires_at || newspaperExpiresAtFromTerm('monthly'));
+  }
 
   const payload = {
     user_id, plan: planCfg.slug, status: 'active',
     started_at: now.toISOString(), expires_at,
     razorpay_payment_id: 'admin_grant',
-    remark: remark?.trim() || null,
+    remark: grantRemark,
     newspaper_addon: wantsNewspaper ? true : (existing?.newspaper_addon ?? false),
+    newspaper_expires_at: wantsNewspaper ? newspaper_expires_at : (existing?.newspaper_expires_at ?? null),
   };
 
   let error;
@@ -286,12 +322,13 @@ exports.adminGrant = async (req, res) => {
   res.json({
     message: wantsNewspaper ? 'Subscription granted with newspaper add-on' : 'Subscription granted',
     newspaper_addon: payload.newspaper_addon,
+    newspaper_term: newsTerm,
   });
 };
 
 // Admin: grant newspaper add-on only (user must already have active subscription)
 exports.adminGrantNewspaper = async (req, res) => {
-  const { user_id, remark } = req.body;
+  const { user_id, remark, newspaper_term } = req.body;
   if (!user_id) return res.status(422).json({ error: 'user_id is required' });
   if (!remark?.trim()) return res.status(422).json({ error: 'remark is required' });
 
@@ -313,20 +350,34 @@ exports.adminGrantNewspaper = async (req, res) => {
   }
 
   const planCfg = await getPlanForPayment(sub.plan);
-  if (planCfg && !planCfg.allow_newspaper_addon) {
+  const isLifetime = planCfg ? planCfg.months == null : sub.plan === 'lifetime';
+  if (planCfg && !planCfg.allow_newspaper_addon && !isLifetime) {
     return res.status(400).json({ error: 'Newspaper add-on is not available for this user\'s plan' });
   }
 
-  const note = `Newspaper grant: ${remark.trim()}`;
+  let newsTerm = newspaper_term === 'yearly' ? 'yearly' : newspaper_term === 'monthly' ? 'monthly' : null;
+  if (isLifetime && !newsTerm) {
+    return res.status(422).json({ error: 'Select monthly or yearly newspaper add-on for lifetime users' });
+  }
+  if (!newsTerm && planCfg) {
+    newsTerm = planCfg.months === 12 ? 'yearly' : 'monthly';
+  }
+
+  const note = newsTerm
+    ? `Newspaper grant (${newsTerm}): ${remark.trim()}`
+    : `Newspaper grant: ${remark.trim()}`;
   const mergedRemark = sub.remark ? `${sub.remark} | ${note}` : note;
+  const newspaper_expires_at = newsTerm
+    ? newspaperExpiresAtFromTerm(newsTerm)
+    : (sub.expires_at || newspaperExpiresAtFromTerm('monthly'));
 
   const { error } = await supabase
     .from('subscriptions')
-    .update({ newspaper_addon: true, remark: mergedRemark })
+    .update({ newspaper_addon: true, newspaper_expires_at, remark: mergedRemark })
     .eq('user_id', user_id);
 
   if (error) return res.status(400).json({ error: error.message });
-  res.json({ message: 'Newspaper add-on granted', newspaper_addon: true });
+  res.json({ message: 'Newspaper add-on granted', newspaper_addon: true, newspaper_term: newsTerm, newspaper_expires_at });
 };
 
 // Admin: revoke subscription
@@ -334,7 +385,7 @@ exports.adminRevoke = async (req, res) => {
   const { user_id } = req.body;
   if (!user_id) return res.status(422).json({ error: 'user_id is required' });
   const { error } = await supabase
-    .from('subscriptions').update({ status: 'cancelled', newspaper_addon: false }).eq('user_id', user_id);
+    .from('subscriptions').update({ status: 'cancelled', newspaper_addon: false, newspaper_expires_at: null }).eq('user_id', user_id);
   if (error) return res.status(400).json({ error: error.message });
   res.json({ message: 'Subscription and newspaper addon revoked' });
 };
@@ -356,7 +407,7 @@ exports.cancelMySubscription = async (req, res) => {
 
   const { error } = await supabase
     .from('subscriptions')
-    .update({ status: 'cancelled', newspaper_addon: false })
+    .update({ status: 'cancelled', newspaper_addon: false, newspaper_expires_at: null })
     .eq('user_id', userId);
 
   if (error) return res.status(400).json({ error: error.message });
@@ -454,9 +505,15 @@ exports.easebuzzCallback = async (req, res) => {
         console.error('[Easebuzz callback] newspaper_addon: user_id missing from query and udf1');
         return redirectToApp(res, 'mybuilding://subscribe?status=failed');
       }
+      const addonPlan = plan || gatewayPayload?.udf2 || 'monthly';
+      const addonCfg = await getPlanForPayment(addonPlan);
+      const term = newspaperTermFromPlan(addonPlan, addonCfg);
       await supabase
         .from('subscriptions')
-        .update({ newspaper_addon: true })
+        .update({
+          newspaper_addon: true,
+          newspaper_expires_at: newspaperExpiresAtFromTerm(term),
+        })
         .eq('user_id', user_id);
 
       return redirectToApp(res, 'mybuilding://subscribe?status=success');
@@ -489,7 +546,11 @@ exports.easebuzzCallback = async (req, res) => {
     }
 
     if (include_newspaper === '1') {
-      await supabase.from('subscriptions').update({ newspaper_addon: true }).eq('user_id', user_id);
+      const newsTerm = newspaperTermFromPlan(plan, planCfg);
+      await supabase.from('subscriptions').update({
+        newspaper_addon: true,
+        newspaper_expires_at: expires_at || newspaperExpiresAtFromTerm(newsTerm),
+      }).eq('user_id', user_id);
     }
 
     const paidAmountRupees = Math.round(Number(gatewayPayload?.amount || 0));
@@ -602,7 +663,7 @@ exports.toggleNewspaperAddon = async (req, res) => {
   // Disable
   const { error } = await supabase
     .from('subscriptions')
-    .update({ newspaper_addon: false })
+    .update({ newspaper_addon: false, newspaper_expires_at: null })
     .eq('user_id', req.user.id);
 
   if (error) return res.status(400).json({ error: error.message });

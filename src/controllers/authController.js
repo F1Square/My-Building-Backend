@@ -124,7 +124,18 @@ exports.unifiedLogin = async (req, res) => {
   return res.json({
     token,
     subscription,
-    user: { id: data.id, name: data.name, email: data.email, role: data.role, building_id: data.building_id, flat_no: data.flat_no, phone: data.phone, wing: data.wing, total_members: data.total_members }
+    user: {
+      id: data.id,
+      name: data.name,
+      email: data.email,
+      role: data.role,
+      building_id: data.building_id,
+      flat_no: data.flat_no,
+      phone: data.phone,
+      wing: data.wing,
+      total_members: data.total_members,
+      app_language: data.app_language || null,
+    }
   });
 };
 
