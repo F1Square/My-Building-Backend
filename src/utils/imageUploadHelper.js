@@ -31,7 +31,7 @@ function mapCloudinaryError(error) {
 
 /**
  * Upload an image to Cloudinary.
- * Buffers use upload_stream (avoids huge base64 data URIs that fail from RN cameras).
+ * Buffers / data-URIs use upload_stream (avoids huge base64 string uploads that time out).
  */
 async function uploadImage(fileBuffer, options = {}) {
   if (!fileBuffer) {
@@ -56,9 +56,12 @@ async function uploadImage(fileBuffer, options = {}) {
     transformation: options.transformation || undefined,
     overwrite: options.overwrite === true,
     unique_filename: !options.publicId,
+    timeout: options.timeoutMs || 45000,
   };
 
-  try {
+  const timeoutMs = options.timeoutMs || 45000;
+
+  const runUpload = async () => {
     let result;
 
     if (Buffer.isBuffer(fileBuffer)) {
@@ -73,7 +76,21 @@ async function uploadImage(fileBuffer, options = {}) {
         Readable.from(fileBuffer).pipe(uploadStream);
       });
     } else if (typeof fileBuffer === 'string') {
-      result = await cloudinary.uploader.upload(fileBuffer, uploadOptions);
+      // Prefer buffer stream for data-URIs — string upload of large base64 often times out on serverless.
+      const dataUriMatch = fileBuffer.match(/^data:image\/[\w+.-]+;base64,(.+)$/i);
+      if (dataUriMatch) {
+        const buf = Buffer.from(dataUriMatch[1], 'base64');
+        if (!buf.length) throw new Error('Empty file buffer');
+        result = await new Promise((resolve, reject) => {
+          const uploadStream = cloudinary.uploader.upload_stream(uploadOptions, (err, res) => {
+            if (err) reject(err);
+            else resolve(res);
+          });
+          Readable.from(buf).pipe(uploadStream);
+        });
+      } else {
+        result = await cloudinary.uploader.upload(fileBuffer, uploadOptions);
+      }
     } else {
       throw new Error('File buffer must be a Buffer or base64 string');
     }
@@ -86,12 +103,22 @@ async function uploadImage(fileBuffer, options = {}) {
       format: result.format,
       bytes: result.bytes,
     };
+  };
+
+  try {
+    return await Promise.race([
+      runUpload(),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Upload timeout. Please try again.')), timeoutMs);
+      }),
+    ]);
   } catch (error) {
     console.error('Image upload error:', error?.http_code, error?.message || error);
     if (
       error.message?.includes('File buffer') ||
       error.message?.includes('Folder') ||
-      error.message?.includes('Empty file')
+      error.message?.includes('Empty file') ||
+      error.message?.includes('Upload timeout')
     ) {
       throw error;
     }

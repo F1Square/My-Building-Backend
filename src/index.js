@@ -48,10 +48,11 @@ app.set('trust proxy', true);
 // This config protects web clients (admin panel, visitor-web) while
 // remaining open enough for legitimate cross-origin requests.
 const allowedOrigins = [
-  'https://my-building-backend.vercel.app',
+  'https://mybuilding.cloud',
+  'https://www.mybuilding.cloud',
+  'https://my-building-web.vercel.app',
   'https://my-building-frontend.vercel.app',
-  // Add any custom domain you use for the web admin/visitor portal:
-  // 'https://mybuilding.example.com',
+  'https://my-building-backend.vercel.app',
 ];
 
 // In development, also allow localhost origins

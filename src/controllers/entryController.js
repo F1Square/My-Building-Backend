@@ -6,42 +6,34 @@ const { resolveVisitorFlat, parseBuildingWings } = require('../utils/flatMatchHe
 
 const PHONE_RE = /^[6-9]\d{9}$/;
 
-async function processVisitorEntryBackground({
-  visitorId,
-  building_id,
-  name,
-  purpose,
-  flat_no,
-  photo_url,
-  flatResidents,
-}) {
-  if (photo_url?.startsWith('data:image')) {
-    try {
-      const uploadRes = await uploadImage(photo_url, {
-        folder: 'visitors',
-        transformation: [{ width: 960, crop: 'limit' }],
-      });
-      await supabase.from('visitors').update({ photo_url: uploadRes.secure_url }).eq('id', visitorId);
-    } catch (err) {
-      console.error('Visitor photo upload failed:', err.message);
-    }
-  } else if (photo_url && !photo_url.startsWith('data:')) {
-    await supabase.from('visitors').update({ photo_url }).eq('id', visitorId);
+async function resolveVisitorPhotoUrl(photo_url) {
+  if (!photo_url) return null;
+  if (!photo_url.startsWith('data:image')) return photo_url;
+  try {
+    const uploadRes = await uploadImage(photo_url, {
+      folder: 'visitors',
+      timeoutMs: 45000,
+      transformation: [{ width: 960, crop: 'limit' }],
+    });
+    return uploadRes.secure_url;
+  } catch (err) {
+    console.error('Visitor photo upload failed:', err.message);
+    return null;
   }
+}
 
+async function notifyVisitorEntry(building_id, visitorId, name, flat_no, purpose, flatResidents) {
+  if (!flatResidents?.length) return;
   const purposeText = purpose?.trim() || null;
-
-  if (flatResidents.length > 0) {
-    await ns.notifyMembers(
-      building_id,
-      {
-        type: 'visitor',
-        meta: { visitor_id: visitorId, flat_no },
-        build: (lang) => createCopy(lang).visitorAtDoor(name, flat_no, purposeText),
-      },
-      flatResidents.map((r) => r.id),
-    );
-  }
+  await ns.notifyMembers(
+    building_id,
+    {
+      type: 'visitor',
+      meta: { visitor_id: visitorId, flat_no },
+      build: (lang) => createCopy(lang).visitorAtDoor(name, flat_no, purposeText),
+    },
+    flatResidents.map((r) => r.id),
+  );
 }
 
 // PUBLIC: visitor self-entry via QR (no auth required)
@@ -83,6 +75,7 @@ exports.visitorSelfEntry = async (req, res) => {
       return res.status(422).json({ error: flatError });
     }
 
+    // Insert first so entry is never lost if upload/notify fails.
     const { data, error } = await supabase
       .from('visitors')
       .insert({
@@ -99,22 +92,39 @@ exports.visitorSelfEntry = async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message });
 
+    // Notify BEFORE photo upload and BEFORE the HTTP response.
+    // On Vercel serverless, work after res.json() is frozen/killed — that caused
+    // push to only appear when residents later opened the app. Also do not start
+    // Cloudinary first: heavy upload can delay/starve notify on a cold isolate.
+    try {
+      await notifyVisitorEntry(
+        building_id,
+        data.id,
+        name.trim(),
+        flatLabel,
+        purpose?.trim(),
+        flatResidents,
+      );
+    } catch (err) {
+      console.error('Visitor entry notify failed:', err.message || err);
+    }
+
+    const finalPhotoUrl = await resolveVisitorPhotoUrl(photo_url);
+    if (finalPhotoUrl) {
+      const { error: photoErr } = await supabase
+        .from('visitors')
+        .update({ photo_url: finalPhotoUrl })
+        .eq('id', data.id);
+      if (photoErr) console.error('Visitor photo DB update failed:', photoErr.message);
+    }
+
     res.status(201).json({
       message: 'Entry logged successfully',
-      visitor: { ...data, photo_pending: !!photo_url },
+      visitor: { ...data, photo_url: finalPhotoUrl },
       building_name: building.name,
       notified_residents: flatResidents.length,
+      photo_uploaded: !!finalPhotoUrl,
     });
-
-    processVisitorEntryBackground({
-      visitorId: data.id,
-      building_id,
-      name: name.trim(),
-      purpose: purpose?.trim(),
-      flat_no: flatLabel,
-      photo_url,
-      flatResidents,
-    }).catch((err) => console.error('Visitor entry background error:', err));
   } catch (error) {
     console.error('Visitor self-entry error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -257,7 +267,7 @@ exports.getBuildingInfo = async (req, res) => {
       var file = input.files[0];
       if (!file) return;
       document.getElementById('photoLabel').textContent = 'Processing photo...';
-      compressImage(file, 960, 0.75, function(dataUrl) {
+      compressImage(file, 720, 0.65, function(dataUrl) {
         photoBase64 = dataUrl;
         document.getElementById('photoLabel').textContent = 'Photo selected ✓';
         var img = document.getElementById('photoPreview');
