@@ -1,11 +1,13 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
 const { createCopy } = require('../utils/notificationCopy');
+const { userDisplayName, mapRowsWithDisplayUsers } = require('../utils/userDisplayName');
 
 // User: submit maintenance request
 exports.submitRequest = async (req, res) => {
   const { title, description, category } = req.body;
-  const { id: user_id, building_id, name } = req.user;
+  const { id: user_id, building_id } = req.user;
+  const displayName = userDisplayName(req.user);
   if (!title?.trim()) return res.status(422).json({ error: 'Title is required' });
   if (title.trim().length > 150) return res.status(422).json({ error: 'Title must not exceed 150 characters' });
   if (description && description.trim().length > 2000) return res.status(422).json({ error: 'Description must not exceed 2000 characters' });
@@ -21,7 +23,7 @@ exports.submitRequest = async (req, res) => {
   await ns.notifyMembersExcept(building_id, user_id, {
     type: 'maintenance_request',
     meta: { request_id: data.id },
-    build: (lang) => createCopy(lang).maintenanceRequestNew(name, title.trim()),
+    build: (lang) => createCopy(lang).maintenanceRequestNew(displayName, title.trim()),
   });
 
   res.status(201).json({ message: 'Request submitted', request: data });
@@ -34,12 +36,12 @@ exports.getRequests = async (req, res) => {
 
   const { data, error } = await supabase
     .from('maintenance_requests')
-    .select('*, users(name, flat_no)')
+    .select('*, users(name, email, flat_no)')
     .eq('building_id', building_id)
     .order('created_at', { ascending: false });
 
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json(mapRowsWithDisplayUsers(data ?? []));
 };
 
 // Pramukh: update request status

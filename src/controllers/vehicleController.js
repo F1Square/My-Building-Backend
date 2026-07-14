@@ -241,7 +241,7 @@ exports.sendParkingReminder = async (req, res) => {
 
   let query = supabase
     .from('vehicles')
-    .select('*, users(id, name)')
+    .select('*, users(id, name, email)')
     .ilike('vehicle_number', vehicle_number.toUpperCase());
 
   if (building_id) query = query.eq('building_id', building_id);
@@ -256,5 +256,5 @@ exports.sendParkingReminder = async (req, res) => {
     build: (lang) => createCopy(lang).parkingReminder(vehicle_number, message),
   });
 
-  res.json({ message: `Reminder sent to ${vehicle.users.name}` });
+  res.json({ message: `Reminder sent to ${userDisplayName(vehicle.users)}` });
 };

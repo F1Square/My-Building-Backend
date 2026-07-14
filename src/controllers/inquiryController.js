@@ -4,6 +4,7 @@ const {
   applyReferralToInquiry,
   ReferralValidationError,
 } = require('../utils/referralHelper');
+const { userDisplayName } = require('../utils/userDisplayName');
 
 const PINCODE_RE = /^\d{6}$/;
 const VALID_SOCIETY_TYPES = ['Apartment Complex', 'Gated Community', 'Township', 'Co-operative Housing', 'Villa Society', 'Other'];
@@ -43,15 +44,17 @@ exports.submitInquiry = async (req, res) => {
       referralCode: referral_code,
       refereeUserId: req.user.id,
       refereeEmail: req.user.email,
+      societyName: society_name,
     });
   } catch (err) {
     if (err instanceof ReferralValidationError) return res.status(err.statusCode).json({ error: err.message });
     throw err;
   }
 
+  const displayName = userDisplayName(req.user);
   const { data, error } = await supabase.from('building_inquiries').insert({
     user_id: req.user.id,
-    user_name: req.user.name,
+    user_name: displayName,
     user_email: req.user.email,
     society_type,
     society_name: society_name.trim(),
@@ -78,7 +81,7 @@ exports.submitInquiry = async (req, res) => {
         referralCode: referral_code,
         refereeUserId: req.user.id,
         refereeEmail: req.user.email,
-        refereeName: req.user.name,
+        refereeName: displayName,
         inquiryId: data.id,
         societyName: society_name.trim(),
       });
@@ -126,15 +129,17 @@ exports.submitPublicInquiry = async (req, res) => {
     await validateReferralForInquiry({
       referralCode: referral_code,
       refereeEmail: normalizedEmail,
+      societyName: society_name,
     });
   } catch (err) {
     if (err instanceof ReferralValidationError) return res.status(err.statusCode).json({ error: err.message });
     throw err;
   }
 
+  const displayName = userDisplayName({ name: user_name, email: normalizedEmail });
   const { data, error } = await supabase.from('building_inquiries').insert({
     user_id: null,
-    user_name: user_name.trim(),
+    user_name: displayName,
     user_email: normalizedEmail,
     society_type,
     society_name: society_name.trim(),
@@ -160,7 +165,7 @@ exports.submitPublicInquiry = async (req, res) => {
       await applyReferralToInquiry({
         referralCode: referral_code,
         refereeEmail: normalizedEmail,
-        refereeName: user_name.trim(),
+        refereeName: displayName,
         inquiryId: data.id,
         societyName: society_name.trim(),
       });
@@ -187,7 +192,10 @@ exports.getInquiries = async (req, res) => {
   }
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json((data || []).map((row) => ({
+    ...row,
+    user_name: userDisplayName({ name: row.user_name, email: row.user_email }),
+  })));
 };
 
 // Admin: update inquiry status

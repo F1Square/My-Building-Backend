@@ -2,6 +2,7 @@ const router = require('express').Router();
 const { authenticate, requireRole } = require('../middleware/auth');
 const supabase = require('../supabase');
 const { logActivity, logError } = require('../utils/activityLogger');
+const { displayNameFromRaw } = require('../utils/userDisplayName');
 
 /**
  * Frontend: log a client-side event (screen open, button tap, etc.).
@@ -84,7 +85,11 @@ router.get('/', authenticate, requireRole('admin'), async (req, res) => {
 
   const { data, error, count } = await query;
   if (error) return res.status(400).json({ error: error.message });
-  res.json({ logs: data || [], total: count || 0 });
+  const logs = (data || []).map((row) => ({
+    ...row,
+    user_name: displayNameFromRaw(row.user_name),
+  }));
+  res.json({ logs, total: count || 0 });
 });
 
 module.exports = router;

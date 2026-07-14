@@ -8,6 +8,7 @@ const {
   parseFeePaise,
   checkoutExtraFeesPaise,
 } = require('../utils/subscriptionPlans');
+const { userDisplayName, mapRowsWithDisplayUsers } = require('../utils/userDisplayName');
 
 /** Admin/paid newspaper term → expiry ISO. */
 function newspaperExpiresAtFromTerm(term, fromDate = new Date()) {
@@ -230,7 +231,7 @@ exports.createOrder = async (req, res) => {
       txnid: merchantTransactionId,
       amount: amount / 100,
       productinfo: `Subscription ${plan}`,
-      firstname: req.user.name || 'User',
+      firstname: userDisplayName(req.user, 'User'),
       email: req.user.email || 'customer@example.com',
       phone: req.user.phone || '9999999999',
       surl: redirectUrl,
@@ -442,7 +443,7 @@ exports.adminGetAll = async (req, res) => {
 
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
-  res.json((data || []).map((row) => ({
+  res.json(mapRowsWithDisplayUsers(data || []).map((row) => ({
     ...row,
     gateway_payment_id: row.razorpay_payment_id || null,
     gateway_order_id: row.razorpay_order_id || null,
@@ -629,7 +630,7 @@ exports.createNewspaperAddonOrder = async (req, res) => {
       txnid: merchantTransactionId,
       amount: addonAmount / 100,
       productinfo: `Newspaper Addon ${addonPlan}`,
-      firstname: req.user.name || 'User',
+      firstname: userDisplayName(req.user, 'User'),
       email: req.user.email || 'customer@example.com',
       phone: req.user.phone || '9999999999',
       surl: redirectUrl,

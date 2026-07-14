@@ -2,6 +2,7 @@ const supabase = require('../supabase');
 const { v4: uuidv4 } = require('uuid');
 const ns = require('../utils/notificationService');
 const { createCopy } = require('../utils/notificationCopy');
+const { userDisplayName, withDisplayUser, mapRowsWithDisplayUsers } = require('../utils/userDisplayName');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_RE = /^[6-9]\d{9}$/;
@@ -195,7 +196,7 @@ exports.requestJoin = async (req, res) => {
   await ns.notifyPramukh(resolvedBuildingId, {
     type: 'join_request',
     meta: { requester_id: user_id, building_id: resolvedBuildingId },
-    build: (lang) => createCopy(lang).joinRequest(req.user.name),
+    build: (lang) => createCopy(lang).joinRequest(userDisplayName(req.user)),
   });
 
   res.json({ message: 'Join request sent', building_code: getBuildingCode(resolvedBuildingId) });
@@ -238,7 +239,7 @@ exports.getAllBuildings = async (req, res) => {
   if (bErr) return res.status(400).json({ error: bErr.message });
 
   // 2. Fetch users to get pramukh name and member counts
-  const { data: users, error: uErr } = await supabase.from('users').select('id, name, role, building_id');
+  const { data: users, error: uErr } = await supabase.from('users').select('id, name, email, role, building_id');
   if (uErr) return res.status(400).json({ error: uErr.message });
 
   // 3. Fetch subscriptions for pramukhs
@@ -255,7 +256,7 @@ exports.getAllBuildings = async (req, res) => {
     return {
       ...b,
       building_code: getBuildingCode(b.id),
-      pramukh_name: pramukh?.name || null,
+      pramukh_name: pramukh ? userDisplayName(pramukh) : null,
       member_count: bUsers.length,
       subscription_status: sub?.status || 'inactive'
     };
@@ -324,7 +325,7 @@ exports.getBuildingMembers = async (req, res) => {
     .eq('building_id', building_id)
     .order('flat_no', { ascending: true });
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json((data || []).map((u) => withDisplayUser(u)));
 };
 
 // Get pending join requests for pramukh
@@ -335,7 +336,7 @@ exports.getPendingRequests = async (req, res) => {
     .eq('building_id', req.user.building_id)
     .eq('status', 'pending');
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json(mapRowsWithDisplayUsers(data ?? []));
 };
 
 // Admin: get bank details for a building
@@ -404,12 +405,13 @@ exports.getAllUsers = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   // Client-side search filter
+  const mapped = (data || []).map((u) => withDisplayUser(u));
   const result = search
-    ? data.filter((u) =>
+    ? mapped.filter((u) =>
       u.name?.toLowerCase().includes(search.toLowerCase()) ||
       u.email?.toLowerCase().includes(search.toLowerCase())
     )
-    : data;
+    : mapped;
 
   res.json(result);
 };

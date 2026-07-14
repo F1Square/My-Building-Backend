@@ -1,12 +1,19 @@
 const supabase = require('../supabase');
+const { userDisplayName, displayNameFromRaw } = require('../utils/userDisplayName');
 
 const MAX_MESSAGE_LENGTH = 500;
+
+function mapChatMessage(row) {
+  if (!row) return row;
+  return { ...row, sender_name: displayNameFromRaw(row.sender_name) };
+}
 
 // Send message
 exports.sendMessage = async (req, res) => {
   const { message } = req.body;
-  const { id: user_id, name } = req.user;
+  const { id: user_id } = req.user;
   const building_id = req.user.building_id || req.query.building_id || req.body.building_id;
+  const senderName = userDisplayName(req.user);
 
   if (!building_id) return res.status(400).json({ error: 'You must be part of a building to chat' });
 
@@ -17,12 +24,33 @@ exports.sendMessage = async (req, res) => {
 
   const { data, error } = await supabase
     .from('chats')
-    .insert({ user_id, building_id, message: trimmed, sender_name: name })
+    .insert({ user_id, building_id, message: trimmed, sender_name: senderName })
     .select('id, user_id, building_id, message, sender_name, created_at')
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json(data);
+  res.status(201).json(mapChatMessage(data));
+};
+
+// Get paginated messages (page 1 = newest window; higher pages = older)
+exports.getMessages = async (req, res) => {
+  const building_id = req.user.building_id || req.query.building_id;
+  if (!building_id) return res.status(400).json({ error: 'You must be part of a building to chat' });
+
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const from = (page - 1) * limit;
+  const to = from + limit - 1;
+
+  const { data, error } = await supabase
+    .from('chats')
+    .select('id, user_id, building_id, message, sender_name, created_at')
+    .eq('building_id', building_id)
+    .order('created_at', { ascending: false })
+    .range(from, to);
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json((data || []).reverse().map(mapChatMessage));
 };
 
 // Get only messages newer than a given message ID (for incremental polling)
@@ -39,41 +67,18 @@ exports.getNewMessages = async (req, res) => {
     .order('created_at', { ascending: true })
     .limit(50);
 
-  // If after_id provided, get the created_at of that message and fetch newer ones
   if (after_id) {
-    const { data: ref } = await supabase
-      .from('chats').select('created_at').eq('id', after_id).single();
-    if (ref) {
-      query = query.gt('created_at', ref.created_at);
+    const { data: afterMsg } = await supabase
+      .from('chats')
+      .select('created_at')
+      .eq('id', after_id)
+      .maybeSingle();
+    if (afterMsg?.created_at) {
+      query = query.gt('created_at', afterMsg.created_at);
     }
   }
 
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data || []);
-};
-
-// Get messages for building (paginated)
-exports.getMessages = async (req, res) => {
-  const building_id = req.user.building_id || req.query.building_id;
-
-  // Admin with no building_id: return empty (they need to pick a building)
-  if (!building_id) {
-    if (req.user.role === 'admin') return res.json([]);
-    return res.status(400).json({ error: 'You must be part of a building' });
-  }
-
-  const page = Math.max(1, parseInt(req.query.page) || 1);
-  const limit = Math.min(100, parseInt(req.query.limit) || 50);
-  const from = (page - 1) * limit;
-
-  const { data, error } = await supabase
-    .from('chats')
-    .select('id, user_id, building_id, message, sender_name, created_at')
-    .eq('building_id', building_id)
-    .order('created_at', { ascending: false })
-    .range(from, from + limit - 1);
-
-  if (error) return res.status(400).json({ error: error.message });
-  res.json(data.reverse());
+  res.json((data || []).map(mapChatMessage));
 };

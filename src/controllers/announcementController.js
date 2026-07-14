@@ -1,9 +1,13 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
 const { createCopy } = require('../utils/notificationCopy');
-const { userDisplayName } = require('../utils/userDisplayName');
+const { userDisplayName, mapRowsWithDisplayUsers } = require('../utils/userDisplayName');
+const { parseListPagination } = require('../utils/validators');
 
 const VALID_PRIORITIES = ['normal', 'urgent'];
+
+// Columns needed by list UI — avoid select('*') on hot path
+const ANNOUNCEMENT_LIST_SELECT = 'id, building_id, title, body, priority, created_by, created_at, users(name, email)';
 
 // Pramukh/Admin: add announcement
 exports.addAnnouncement = async (req, res) => {
@@ -17,33 +21,35 @@ exports.addAnnouncement = async (req, res) => {
   if (body.trim().length > 2000) return res.status(422).json({ error: 'Body must not exceed 2000 characters' });
   if (priority && !VALID_PRIORITIES.includes(priority)) return res.status(422).json({ error: 'priority must be normal or urgent' });
 
+  const titleTrimmed = title.trim();
+  const bodyTrimmed = body.trim();
+  const resolvedPriority = priority || 'normal';
+
   const { data, error } = await supabase
     .from('announcements')
     .insert({
       building_id,
-      title: title.trim(),
-      body: body.trim(),
-      priority: priority || 'normal',
+      title: titleTrimmed,
+      body: bodyTrimmed,
+      priority: resolvedPriority,
       created_by: req.user.id
     })
-    .select().single();
+    .select('id, building_id, title, body, priority, created_by, created_at')
+    .single();
 
   if (error) return res.status(400).json({ error: error.message });
 
-  const { data: author } = await supabase
-    .from('users')
-    .select('name, email')
-    .eq('id', req.user.id)
-    .single();
-  const authorName = userDisplayName(author || req.user, 'Pramukh');
+  // Use JWT user — skip extra users round-trip for author name
+  const authorName = userDisplayName(req.user, 'Pramukh');
 
+  // notifyMembers only targets status=approved (pending/unapproved are excluded)
   await ns.notifyMembers(building_id, {
-    type: priority === 'urgent' ? 'announcement_urgent' : 'announcement',
-    meta: { announcement_id: data.id, priority: priority || 'normal' },
+    type: resolvedPriority === 'urgent' ? 'announcement_urgent' : 'announcement',
+    meta: { announcement_id: data.id, priority: resolvedPriority },
     build: (lang) => createCopy(lang).announcement(
-      title.trim(),
-      body.trim(),
-      priority === 'urgent',
+      titleTrimmed,
+      bodyTrimmed,
+      resolvedPriority === 'urgent',
       authorName,
     ),
   });
@@ -51,34 +57,32 @@ exports.addAnnouncement = async (req, res) => {
   res.status(201).json({ message: 'Announcement posted', announcement: data });
 };
 
-// Get announcements for building
+// Get announcements for building — newest first, building-scoped, paginated
 exports.getAnnouncements = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
+  const { limit, offset } = parseListPagination(req.query);
 
-  // Admin with no building: return all announcements across all buildings
+  // Admin with no building: return newest across all buildings (capped)
   if (!building_id) {
     if (req.user.role === 'admin') {
       const { data, error } = await supabase
         .from('announcements')
-        .select('*, users(name)')
+        .select(ANNOUNCEMENT_LIST_SELECT)
         .order('created_at', { ascending: false })
-        .limit(100);
+        .range(offset, offset + limit - 1);
       if (error) return res.status(400).json({ error: error.message });
-      return res.json(data);
+      return res.json(mapRowsWithDisplayUsers(data ?? []));
     }
     return res.status(400).json({ error: 'You must be part of a building' });
   }
 
-  const limit = parseInt(req.query.limit) || 50;
-  const offset = parseInt(req.query.offset) || 0;
-
   const { data, error } = await supabase
     .from('announcements')
-    .select('*, users(name)')
+    .select(ANNOUNCEMENT_LIST_SELECT)
     .eq('building_id', building_id)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json(mapRowsWithDisplayUsers(data ?? []));
 };

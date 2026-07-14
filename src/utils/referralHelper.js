@@ -17,13 +17,17 @@ function normalizeReferralCode(code) {
   return trimmed;
 }
 
+function normalizeSocietyName(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ');
+}
+
 async function resolveReferrer(referralCode) {
   const code = normalizeReferralCode(referralCode);
   if (!code) return null;
 
   const { data: referrer } = await supabase
     .from('users')
-    .select('id, email')
+    .select('id, email, building_id')
     .eq('referral_code', code)
     .maybeSingle();
 
@@ -41,13 +45,63 @@ function assertNotSelfReferral(referrer, { refereeUserId, refereeEmail }) {
   }
 }
 
+/** Members of the same society cannot use each other's referral codes. */
+async function assertNotSameSocietyMember(referrer, refereeUserId) {
+  if (!refereeUserId || !referrer.building_id) return;
+
+  const { data: referee } = await supabase
+    .from('users')
+    .select('building_id')
+    .eq('id', refereeUserId)
+    .maybeSingle();
+
+  if (referee?.building_id && referee.building_id === referrer.building_id) {
+    throw new ReferralValidationError(
+      'Members of the same society cannot use each other’s referral codes',
+    );
+  }
+}
+
+/**
+ * Only one referral may be credited for a given society registration
+ * (case-insensitive society name, once linked to an inquiry).
+ */
+async function assertSocietyNotAlreadyReferred(societyName, { excludeInquiryId } = {}) {
+  const name = normalizeSocietyName(societyName);
+  if (!name) return;
+
+  let query = supabase
+    .from('referrals')
+    .select('id, inquiry_id')
+    .ilike('society_name', name)
+    .not('inquiry_id', 'is', null)
+    .limit(2);
+
+  const { data: rows, error } = await query;
+  if (error) throw error;
+
+  const conflict = (rows || []).find((r) => r.inquiry_id !== excludeInquiryId);
+  if (conflict) {
+    throw new ReferralValidationError(
+      'A referral has already been applied for this society registration',
+    );
+  }
+}
+
 /** Validate referral code before creating a society inquiry (no DB writes). */
-async function validateReferralForInquiry({ referralCode, refereeUserId, refereeEmail }) {
+async function validateReferralForInquiry({
+  referralCode,
+  refereeUserId,
+  refereeEmail,
+  societyName,
+}) {
   const referrer = await resolveReferrer(referralCode);
   if (!referrer) return;
 
   const normalizedEmail = refereeEmail.trim().toLowerCase();
   assertNotSelfReferral(referrer, { refereeUserId, refereeEmail: normalizedEmail });
+  await assertNotSameSocietyMember(referrer, refereeUserId);
+  await assertSocietyNotAlreadyReferred(societyName);
 
   const { data: existing } = await supabase
     .from('referrals')
@@ -74,7 +128,11 @@ async function applyReferralToInquiry({
   if (!referrer) return;
 
   const normalizedEmail = refereeEmail.trim().toLowerCase();
+  const normalizedSociety = normalizeSocietyName(societyName);
+
   assertNotSelfReferral(referrer, { refereeUserId, refereeEmail: normalizedEmail });
+  await assertNotSameSocietyMember(referrer, refereeUserId);
+  await assertSocietyNotAlreadyReferred(normalizedSociety, { excludeInquiryId: inquiryId });
 
   const { data: onInquiry } = await supabase
     .from('referrals')
@@ -96,7 +154,7 @@ async function applyReferralToInquiry({
       .update({
         referrer_id: referrer.id,
         inquiry_id: inquiryId,
-        society_name: societyName,
+        society_name: normalizedSociety,
         referee_name: refereeName,
       })
       .eq('id', pending.id);
@@ -120,7 +178,7 @@ async function applyReferralToInquiry({
     inquiry_id: inquiryId,
     referee_name: refereeName,
     referee_email: normalizedEmail,
-    society_name: societyName,
+    society_name: normalizedSociety,
   });
   if (error) throw error;
 }

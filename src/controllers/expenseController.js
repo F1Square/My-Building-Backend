@@ -1,7 +1,7 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
 const { createCopy } = require('../utils/notificationCopy');
-const { withDisplayUser, userDisplayName } = require('../utils/userDisplayName');
+const { withDisplayUser, userDisplayName, mapRowsWithDisplayUsers } = require('../utils/userDisplayName');
 
 // ── Get all wings for a building ──────────────────────────────────────────────
 exports.getWings = async (req, res) => {
@@ -384,7 +384,7 @@ exports.getEditLogs = async (req, res) => {
 
   let query = supabase
     .from('expense_edit_logs')
-    .select('*, edited_by_user:users!expense_edit_logs_edited_by_fkey(name, role)')
+    .select('*, edited_by_user:users!expense_edit_logs_edited_by_fkey(name, email, role)')
     .eq('wing', wing)
     .order('edited_at', { ascending: false })
     .limit(200);
@@ -393,7 +393,7 @@ exports.getEditLogs = async (req, res) => {
 
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data || []);
+  res.json(mapRowsWithDisplayUsers(data || [], ['edited_by_user']));
 };
 
 // ── Export entries (PDF / Excel) ──────────────────────────────────────────────

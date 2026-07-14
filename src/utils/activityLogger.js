@@ -1,4 +1,5 @@
 const supabase = require('../supabase');
+const { userDisplayName } = require('./userDisplayName');
 
 /**
  * Insert a row into user_activity_logs. Fire-and-forget — never throws,
@@ -20,7 +21,7 @@ async function logActivity(user, action, module, detail = {}, ip = null, level =
     const enrichedDetail = { ...detail, level };
     await supabase.from('user_activity_logs').insert({
       user_id:     user?.id   || null,
-      user_name:   user?.name || null,
+      user_name:   user ? userDisplayName(user) : null,
       user_role:   user?.role || null,
       building_id: user?.building_id || null,
       action,

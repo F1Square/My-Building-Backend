@@ -1,5 +1,6 @@
 const supabase = require('../supabase');
 const crypto = require('crypto');
+const { mapRowsWithDisplayUsers } = require('../utils/userDisplayName');
 
 // Generate a random uppercase code like "SAVE20" or "FLAT150"
 function generateCode(prefix = '') {
@@ -47,7 +48,7 @@ exports.listPromos = async (req, res) => {
     .order('created_at', { ascending: false });
 
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json(mapRowsWithDisplayUsers(data ?? [], ['used_by_user']));
 };
 
 // Admin: delete a promo code (only if unused)

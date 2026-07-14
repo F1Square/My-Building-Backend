@@ -36,9 +36,31 @@ function userDisplayName(user, fallback = 'Resident') {
   return fallback;
 }
 
+/** Normalize a stored string that may be an email used as a "name". */
+function displayNameFromRaw(raw, fallback = 'Resident') {
+  return userDisplayName({ name: raw, email: raw }, fallback);
+}
+
 function withDisplayUser(user) {
   if (!user) return user;
   return { ...user, name: userDisplayName(user) };
+}
+
+/**
+ * Map list rows that embed user objects (default key: users).
+ * Example: mapRowsWithDisplayUsers(data) or mapRowsWithDisplayUsers(data, ['users', 'referrer'])
+ */
+function mapRowsWithDisplayUsers(rows, userKeys = ['users']) {
+  if (!Array.isArray(rows)) return rows;
+  const keys = Array.isArray(userKeys) ? userKeys : [userKeys];
+  return rows.map((row) => {
+    if (!row) return row;
+    const next = { ...row };
+    for (const key of keys) {
+      if (next[key]) next[key] = withDisplayUser(next[key]);
+    }
+    return next;
+  });
 }
 
 function mapComplaint(complaint) {
@@ -55,7 +77,9 @@ function mapComplaints(complaints) {
 
 module.exports = {
   userDisplayName,
+  displayNameFromRaw,
   withDisplayUser,
+  mapRowsWithDisplayUsers,
   mapComplaint,
   mapComplaints,
 };

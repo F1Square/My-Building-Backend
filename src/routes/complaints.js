@@ -7,9 +7,9 @@ const c = require('../controllers/complaintController');
 router.post('/', authenticate, requireRole('user', 'pramukh'), c.createComplaint);
 
 // Upload complaint attachment endpoint
-router.post('/upload-attachment', 
-  authenticate, 
-  requireRole('user', 'pramukh'), 
+router.post('/upload-attachment',
+  authenticate,
+  requireRole('user', 'pramukh', 'admin'),
   ...singleImageUpload('attachment'),
   requireFile,
   c.uploadComplaintAttachment

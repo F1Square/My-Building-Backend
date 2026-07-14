@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const supabase = require('../supabase');
 const { logActivity } = require('../utils/activityLogger');
+const { userDisplayName, withDisplayUser } = require('../utils/userDisplayName');
 
 // Helper: fetch active subscription for a user
 const getSubscription = async (user_id) => {
@@ -26,7 +27,7 @@ exports.getMe = async (req, res) => {
     .eq('id', req.user.id)
     .single();
   if (error || !data) return res.status(404).json({ error: 'User not found' });
-  res.json({ user: data });
+  res.json({ user: withDisplayUser(data) });
 };
 
 exports.setAppLanguage = async (req, res) => {
@@ -118,15 +119,16 @@ exports.unifiedLogin = async (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
 
-  logActivity({ id: data.id, name: data.name, role: data.role, building_id: data.building_id }, 'login_success', 'auth', {}, req.ip, 'info');
-  const token = signToken({ id: data.id, role: data.role, name: data.name, building_id: data.building_id, flat_no: data.flat_no });
+  const displayName = userDisplayName(data);
+  logActivity({ id: data.id, name: displayName, email: data.email, role: data.role, building_id: data.building_id }, 'login_success', 'auth', {}, req.ip, 'info');
+  const token = signToken({ id: data.id, role: data.role, name: displayName, email: data.email, building_id: data.building_id, flat_no: data.flat_no });
   const subscription = await getSubscription(data.id);
   return res.json({
     token,
     subscription,
     user: {
       id: data.id,
-      name: data.name,
+      name: displayName,
       email: data.email,
       role: data.role,
       building_id: data.building_id,
@@ -175,10 +177,11 @@ exports.fixedLogin = async (req, res) => {
   const valid = await bcrypt.compare(password, data.password_hash);
   if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
+  const displayName = userDisplayName(data);
   return res.json({
-    token: signToken({ id: data.id, role: 'pramukh', name: data.name, building_id: data.building_id }),
+    token: signToken({ id: data.id, role: 'pramukh', name: displayName, email: data.email, building_id: data.building_id }),
     subscription: await getSubscription(data.id),
-    user: { id: data.id, name: data.name, email: data.email, role: 'pramukh', building_id: data.building_id, phone: data.phone, wing: data.wing, total_members: data.total_members }
+    user: { id: data.id, name: displayName, email: data.email, role: 'pramukh', building_id: data.building_id, phone: data.phone, wing: data.wing, total_members: data.total_members }
   });
 };
 
@@ -237,11 +240,12 @@ exports.login = async (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
 
-  logActivity({ id: data.id, name: data.name, role: data.role, building_id: data.building_id }, 'login_success', 'auth', {}, req.ip, 'info');
+  const displayName = userDisplayName(data);
+  logActivity({ id: data.id, name: displayName, email: data.email, role: data.role, building_id: data.building_id }, 'login_success', 'auth', {}, req.ip, 'info');
   res.json({
-    token: signToken({ id: data.id, role: data.role, name: data.name, building_id: data.building_id }),
+    token: signToken({ id: data.id, role: data.role, name: displayName, email: data.email, building_id: data.building_id }),
     subscription: await getSubscription(data.id),
-    user: { id: data.id, name: data.name, email: data.email, role: data.role, building_id: data.building_id, flat_no: data.flat_no, phone: data.phone, wing: data.wing, total_members: data.total_members }
+    user: { id: data.id, name: displayName, email: data.email, role: data.role, building_id: data.building_id, flat_no: data.flat_no, phone: data.phone, wing: data.wing, total_members: data.total_members }
   });
 };
 

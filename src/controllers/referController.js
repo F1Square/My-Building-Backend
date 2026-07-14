@@ -1,4 +1,5 @@
 const supabase = require('../supabase');
+const { mapRowsWithDisplayUsers, displayNameFromRaw } = require('../utils/userDisplayName');
 
 // Charset excludes ambiguous chars: 0, O, I, 1
 const CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -105,7 +106,10 @@ exports.adminGetAll = async (req, res) => {
     .order('created_at', { ascending: false });
 
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json(mapRowsWithDisplayUsers(data ?? [], ['referrer']).map((row) => ({
+    ...row,
+    referee_name: displayNameFromRaw(row.referee_name),
+  })));
 };
 
 // POST /refer/admin/grant-subscription

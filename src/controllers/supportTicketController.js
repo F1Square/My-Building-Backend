@@ -1,6 +1,12 @@
 const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
 const { createCopy } = require('../utils/notificationCopy');
+const {
+  userDisplayName,
+  displayNameFromRaw,
+  withDisplayUser,
+  mapRowsWithDisplayUsers,
+} = require('../utils/userDisplayName');
 
 const VALID_STATUS = ['open', 'in_progress', 'resolved', 'closed'];
 
@@ -20,10 +26,12 @@ async function getTicketForUser(ticketId, user) {
 
   if (error || !ticket) return { error: 'Ticket not found', status: 404 };
 
-  if (user.role === 'admin') return { ticket };
+  const mapped = { ...ticket, users: withDisplayUser(ticket.users) };
+
+  if (user.role === 'admin') return { ticket: mapped };
   if (ticket.user_id !== user.id) return { error: 'Access denied', status: 403 };
 
-  return { ticket };
+  return { ticket: mapped };
 }
 
 async function getMessages(ticketId) {
@@ -35,7 +43,10 @@ async function getMessages(ticketId) {
     .order('created_at', { ascending: true });
 
   if (error) throw error;
-  return data || [];
+  return (data || []).map((m) => ({
+    ...m,
+    sender_name: displayNameFromRaw(m.sender_name),
+  }));
 }
 
 // POST /support-tickets — user/pramukh create
@@ -44,6 +55,7 @@ exports.createTicket = async (req, res) => {
   if (!subject?.trim()) return res.status(422).json({ error: 'Subject is required' });
   if (!message?.trim()) return res.status(422).json({ error: 'Message is required' });
 
+  const senderName = userDisplayName(req.user);
   const now = new Date().toISOString();
   const { data: ticket, error } = await supabase
     .from('support_tickets')
@@ -66,7 +78,7 @@ exports.createTicket = async (req, res) => {
   const { error: msgErr } = await supabase.from('support_ticket_messages').insert({
     ticket_id: ticket.id,
     sender_id: req.user.id,
-    sender_name: req.user.name,
+    sender_name: senderName,
     sender_role: req.user.role,
     message: message.trim(),
   });
@@ -77,7 +89,7 @@ exports.createTicket = async (req, res) => {
 
   await notifyAdmins({
     meta: { ticket_id: ticket.id },
-    build: (lang) => createCopy(lang).supportTicketNew(req.user.name, subject.trim()),
+    build: (lang) => createCopy(lang).supportTicketNew(senderName, subject.trim()),
   });
 
   res.status(201).json({ message: 'Support ticket created', ticket });
@@ -115,7 +127,7 @@ exports.adminGetTickets = async (req, res) => {
 
   const { data, error } = await query;
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+  res.json(mapRowsWithDisplayUsers(data ?? []));
 };
 
 // GET /support-tickets/:id — ticket + messages
@@ -146,6 +158,7 @@ exports.addMessage = async (req, res) => {
     return res.status(400).json({ error: 'This ticket is closed' });
   }
 
+  const senderName = userDisplayName(req.user);
   const now = new Date().toISOString();
   const isAdmin = req.user.role === 'admin';
 
@@ -154,7 +167,7 @@ exports.addMessage = async (req, res) => {
     .insert({
       ticket_id: id,
       sender_id: req.user.id,
-      sender_name: req.user.name,
+      sender_name: senderName,
       sender_role: req.user.role,
       message: message.trim(),
     })
@@ -181,11 +194,11 @@ exports.addMessage = async (req, res) => {
   } else if (!isAdmin) {
     await notifyAdmins({
       meta: { ticket_id: id },
-      build: (lang) => createCopy(lang).supportUserReply(req.user.name, ticket.subject),
+      build: (lang) => createCopy(lang).supportUserReply(senderName, ticket.subject),
     });
   }
 
-  res.status(201).json({ message: 'Reply sent', reply: msg });
+  res.status(201).json({ message: 'Reply sent', reply: { ...msg, sender_name: senderName } });
 };
 
 // PATCH /support-tickets/:id/status — admin update status

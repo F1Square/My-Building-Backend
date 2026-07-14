@@ -6,6 +6,8 @@ const addMaintenanceExpense = require('../utils/addMaintenanceExpense');
 const { uploadImage } = require('../utils/imageUploadHelper');
 const { getPaymentCallbackUrl } = require('../utils/backendUrl');
 const { logActivity } = require('../utils/activityLogger');
+const { computeMaintenancePayable } = require('../utils/maintenancePayable');
+const { withDisplayUser, userDisplayName, mapRowsWithDisplayUsers } = require('../utils/userDisplayName');
 
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -398,22 +400,16 @@ exports.getPaymentRecords = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   const mapped = data.map(p => {
-    const billAmount = Number(p.amount);
-    const penaltyAmount = Number(p.penalty_amount || 0);
-    const dueDate = p.maintenance_bills?.due_date;
-    const isOverdue = dueDate && new Date(dueDate) < new Date();
-    // Only apply penalty for maintenance category
-    const isMaintenance = (p.category || p.maintenance_bills?.category || 'maintenance') === 'maintenance';
-    const displayAmount = p.total_amount
-      ? Number(p.total_amount)
-      : billAmount + (isMaintenance && isOverdue && penaltyAmount > 0 ? penaltyAmount : 0);
+    const payable = computeMaintenancePayable(p);
 
     return {
       ...p,
+      users: withDisplayUser(p.users),
       gateway_payment_id: p.razorpay_payment_id || null,
       gateway_order_id: p.razorpay_order_id || null,
-      display_amount: displayAmount,
-      is_overdue: !!(isMaintenance && isOverdue && penaltyAmount > 0),
+      display_amount: payable.totalAmount,
+      penalty_amount: p.status === 'paid' ? Number(p.penalty_amount || 0) : payable.penaltyAmount,
+      is_overdue: payable.isOverdue,
       building_payment_method: p.buildings?.payment_method ?? null,
       building_payment_tc: p.buildings?.payment_tc ?? null,
       buildings: undefined,
@@ -672,22 +668,18 @@ exports.createPaymentOrder = async (req, res) => {
   // Fetch payment record with bill, user, and building info
   const { data: record, error: recErr } = await supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(amount, month, year, due_date, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, phone, email, id), buildings(name, address)')
+    .select('*, maintenance_bills(amount, month, year, due_date, description, category, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, phone, email, id), buildings(name, address)')
     .eq('id', payment_record_id).eq('user_id', req.user.id).single();
 
   if (recErr || !record) return res.status(404).json({ error: 'Payment record not found' });
   if (record.status === 'paid') return res.status(400).json({ error: 'Already paid' });
 
-  // Calculate total: apply penalty if past due date
-  const billAmount = Number(record.maintenance_bills.amount);
-  const penaltyAmount = Number(record.penalty_amount || record.maintenance_bills.penalty_amount || 0);
-  const dueDate = record.maintenance_bills.due_date;
-  const isOverdue = dueDate && new Date(dueDate) < new Date();
-  const totalAmount = billAmount + (isOverdue && penaltyAmount > 0 ? penaltyAmount : 0);
+  // Same formula as My Bill / getPaymentRecords (base + overdue maintenance penalty)
+  const { baseAmount, penaltyAmount, totalAmount, isOverdue } = computeMaintenancePayable(record);
 
-  // Store total_amount on the payment record
+  // Freeze charged total + applied penalty for this checkout (do not wipe configured fee as 0 before due)
   await supabase.from('maintenance_payments')
-    .update({ total_amount: totalAmount, penalty_amount: isOverdue ? penaltyAmount : 0 })
+    .update({ total_amount: totalAmount, penalty_amount: penaltyAmount })
     .eq('id', payment_record_id);
 
   try {
@@ -710,7 +702,7 @@ exports.createPaymentOrder = async (req, res) => {
       txnid: merchantTransactionId,
       amount: totalAmount,
       productinfo,
-      firstname: record.users?.name || 'Resident',
+      firstname: userDisplayName(record.users || req.user, 'Resident'),
       email: record.users?.email || req.user?.email || 'customer@example.com',
       phone: record.users?.phone || '9999999999',
       surl: redirectUrl,
@@ -730,10 +722,12 @@ exports.createPaymentOrder = async (req, res) => {
     res.json({
       order_id: merchantTransactionId,
       amount: totalAmount,
+      base_amount: baseAmount,
+      penalty_amount: penaltyAmount,
       checkout_url: paymentUrl,
       payment_record_id,
       society_name: record.buildings?.name,
-      is_overdue: isOverdue && penaltyAmount > 0,
+      is_overdue: isOverdue,
       settlement_target: 'society',
     });
   } catch (err) {
@@ -791,13 +785,13 @@ exports.easebuzzCallback = async (req, res) => {
           try {
             const { data: rec } = await supabase
               .from('maintenance_payments')
-              .select('user_id, building_id, amount, total_amount, maintenance_bills(month, year, amount), users(name, role)')
+              .select('user_id, building_id, amount, total_amount, maintenance_bills(month, year, amount), users(name, email, role)')
               .eq('id', record_id).single();
 
             const tasks = [addMaintenanceExpense(record_id)];
             if (rec) {
               tasks.push(logActivity(
-                { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
+                { id: rec.user_id, name: userDisplayName(rec.users), email: rec.users?.email, role: rec.users?.role, building_id: rec.building_id },
                 'payment_completed',
                 'maintenance',
                 {
@@ -821,13 +815,13 @@ exports.easebuzzCallback = async (req, res) => {
       // Payment failed or hash mismatch
       const { data: rec } = await supabase
         .from('maintenance_payments')
-        .select('user_id, building_id, amount, maintenance_bills(month, year), users(name, role)')
+        .select('user_id, building_id, amount, maintenance_bills(month, year), users(name, email, role)')
         .eq('id', record_id).single();
 
       if (rec) {
         // Fire-and-forget; logActivity already swallows its own errors.
         logActivity(
-          { id: rec.user_id, name: rec.users?.name, role: rec.users?.role, building_id: rec.building_id },
+          { id: rec.user_id, name: userDisplayName(rec.users), email: rec.users?.email, role: rec.users?.role, building_id: rec.building_id },
           'payment_failed',
           'maintenance',
           { record_id, reason: status || 'verification_failed', amount: rec.amount, period: `${rec.maintenance_bills?.month}/${rec.maintenance_bills?.year}` }
@@ -859,7 +853,7 @@ exports.downloadReceipt = async (req, res) => {
     return res.status(403).json({ error: 'Access denied' });
 
   const bill = record.maintenance_bills;
-  const user = record.users;
+  const user = withDisplayUser(record.users);
   const building = record.buildings;
 
   // Resolve amounts. Use the per-record numbers (penalty_amount, total_amount)
@@ -915,7 +909,7 @@ exports.downloadReceipt = async (req, res) => {
 
   doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Resident', 300, 175);
   doc.font('Helvetica').fontSize(10).fillColor('#374151');
-  doc.text(`Name: ${user?.name || '—'}`, 300, 191);
+  doc.text(`Name: ${userDisplayName(user)}`, 300, 191);
   doc.text(`Flat: ${user?.flat_no || 'N/A'}  |  Phone: ${user?.phone || 'N/A'}`, 300, 205);
 
   // Table header
@@ -984,18 +978,21 @@ exports.getReport = async (req, res) => {
 
   const { data: payments } = await supabase
     .from('maintenance_payments')
-    .select('*, users!maintenance_payments_user_id_fkey(name, flat_no, wing)')
+    .select('*, users!maintenance_payments_user_id_fkey(name, email, flat_no, wing)')
     .eq('bill_id', bill_id)
     .order('created_at', { ascending: true });
 
-  const rows = (payments || []).map(p => ({
-    flat_no: p.users?.flat_no || '—',
-    wing: p.users?.wing || '—',
-    name: p.users?.name || '—',
-    amount: Number(p.flat_amount || p.amount),
-    status: p.status === 'paid' ? 'Paid' : 'Pending',
-    paid_at: p.paid_at ? new Date(p.paid_at).toLocaleDateString('en-IN') : '—',
-  }));
+  const rows = (payments || []).map(p => {
+    const u = withDisplayUser(p.users);
+    return {
+      flat_no: u?.flat_no || '—',
+      wing: u?.wing || '—',
+      name: u?.name || '—',
+      amount: Number(p.flat_amount || p.amount),
+      status: p.status === 'paid' ? 'Paid' : 'Pending',
+      paid_at: p.paid_at ? new Date(p.paid_at).toLocaleDateString('en-IN') : '—',
+    };
+  });
 
   const categoryLabel = { maintenance: 'Maintenance Bill', water_meter: 'Water Meter Bill', special: 'Special Bill' }[bill.category || 'maintenance'] || 'Bill';
   const periodLabel = bill.month ? `${MONTHS[bill.month]} ${bill.year}` : (bill.description || '');
@@ -1146,7 +1143,7 @@ exports.getTransferStatus = async (req, res) => {
       .select(`
         id, amount, total_amount, status, razorpay_payment_id, razorpay_transfer_id,
         transfer_error, transfer_attempted_at, transfer_completed_at, paid_at,
-        users(name, flat_no),
+        users(name, email, flat_no),
         maintenance_bills(month, year, description)
       `)
       .eq('building_id', building_id)
@@ -1162,7 +1159,7 @@ exports.getTransferStatus = async (req, res) => {
       .single();
 
     res.json({
-      payments: payments || [],
+      payments: mapRowsWithDisplayUsers(payments || []),
       bank_details: bankDetails,
       summary: {
         total_payments: payments?.length || 0,

@@ -153,6 +153,9 @@ function createCopy(lang) {
       supportUserReplyBody: (name, subject) => `${name} replied on "${subject}".`,
       supportStatusTitle: '📋 Ticket Status Updated',
       supportStatusBody: (subject, status) => `Your request "${subject}" is now ${status}.`,
+      societyRuleTitle: '📖 New Society Rule',
+      societyRuleUpdatedTitle: '📖 Society Rule Updated',
+      societyRuleBody: (title, category, by) => `${title} (${category}) — by ${by}`,
     },
     hi: {
       announcementTitle: 'नई घोषणा जोड़ी गई',
@@ -228,6 +231,9 @@ function createCopy(lang) {
       supportUserReplyBody: (name, subject) => `${name} ने "${subject}" पर जवाब दिया।`,
       supportStatusTitle: '📋 टिकट स्थिति अपडेट',
       supportStatusBody: (subject, status) => `आपका अनुरोध "${subject}" अब ${status} है।`,
+      societyRuleTitle: '📖 नया सोसायटी नियम',
+      societyRuleUpdatedTitle: '📖 सोसायटी नियम अपडेट',
+      societyRuleBody: (title, category, by) => `${title} (${category}) — द्वारा ${by}`,
     },
     gu: {
       announcementTitle: 'નવી જાહેરાત ઉમેરાઈ',
@@ -303,6 +309,9 @@ function createCopy(lang) {
       supportUserReplyBody: (name, subject) => `${name} એ "${subject}" પર જવાબ આપ્યો.`,
       supportStatusTitle: '📋 ટિકિટ સ્થિતિ અપડેટ',
       supportStatusBody: (subject, status) => `તમારી વિનંતી "${subject}" હવે ${status} છે.`,
+      societyRuleTitle: '📖 નવો સોસાયટી નિયમ',
+      societyRuleUpdatedTitle: '📖 સોસાયટી નિયમ અપડેટ',
+      societyRuleBody: (title, category, by) => `${title} (${category}) — દ્વારા ${by}`,
     },
   }[L];
 
@@ -317,6 +326,11 @@ function createCopy(lang) {
     announcement: (title, body, urgent, byName) => ({
       title: urgent ? t.announcementUrgentTitle : t.announcementTitle,
       body: t.announcementBody(title, preview(body), byName || 'Pramukh'),
+    }),
+
+    societyRule: (title, category, byName, isUpdate) => ({
+      title: isUpdate ? t.societyRuleUpdatedTitle : t.societyRuleTitle,
+      body: t.societyRuleBody(title, category || 'General', byName || 'Pramukh'),
     }),
 
     maintenanceBill: (amount, month, year, dueDate, penalty) => {

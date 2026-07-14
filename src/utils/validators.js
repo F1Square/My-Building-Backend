@@ -46,3 +46,16 @@ exports.isUUID = (v, field) => {
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   return (v && !UUID_RE.test(v)) ? `${field} must be a valid ID` : null;
 };
+
+/**
+ * Safe list pagination from query params.
+ * Defaults: limit 50, offset 0. Caps limit to avoid oversized reads.
+ */
+exports.parseListPagination = (query = {}, { defaultLimit = 50, maxLimit = 100 } = {}) => {
+  let limit = parseInt(query.limit, 10);
+  let offset = parseInt(query.offset, 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = defaultLimit;
+  if (limit > maxLimit) limit = maxLimit;
+  if (!Number.isFinite(offset) || offset < 0) offset = 0;
+  return { limit, offset };
+};
