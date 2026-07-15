@@ -1,9 +1,16 @@
 const router = require('express').Router();
 const { authenticate, requireRole } = require('../middleware/auth');
 const rateLimiter = require('../middleware/rateLimiter');
-const { submitInquiry, submitPublicInquiry, getInquiries, updateInquiryStatus } = require('../controllers/inquiryController');
+const {
+  submitInquiry,
+  submitPublicInquiry,
+  validatePublicReferral,
+  getInquiries,
+  updateInquiryStatus,
+} = require('../controllers/inquiryController');
 
 // PUBLIC — from website registration form (no auth needed)
+router.post('/public/validate-referral', rateLimiter(10, 60_000), validatePublicReferral);
 router.post('/public', rateLimiter(5, 60_000), submitPublicInquiry);
 
 // Authenticated user submitting from app

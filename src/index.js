@@ -55,9 +55,34 @@ const allowedOrigins = [
   'https://my-building-backend.vercel.app',
 ];
 
-// In development, also allow localhost origins
-if (process.env.NODE_ENV === 'development') {
-  allowedOrigins.push('http://localhost:3000', 'http://localhost:5000', 'http://localhost:8081');
+// Local / LAN web clients (Vite default is :8080)
+const localDevOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'http://localhost:8080',
+  'http://localhost:8081',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5000',
+  'http://127.0.0.1:8080',
+  'http://127.0.0.1:8081',
+];
+
+if (process.env.NODE_ENV !== 'production') {
+  allowedOrigins.push(...localDevOrigins);
+}
+
+function isPrivateLanOrigin(origin) {
+  try {
+    const { hostname, protocol } = new URL(origin);
+    if (protocol !== 'http:' && protocol !== 'https:') return false;
+    // 10.x, 172.16–31.x, 192.168.x — common for phone / WSL / LAN testing
+    if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+    if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 app.use(cors({
@@ -65,6 +90,9 @@ app.use(cors({
     // Allow requests with no origin (mobile apps, Postman, curl, server-to-server)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (process.env.NODE_ENV !== 'production' && isPrivateLanOrigin(origin)) {
+      return callback(null, true);
+    }
     // For safety, still allow — log for audit. Change to callback(new Error(...)) to block.
     console.warn(`[CORS] Request from unlisted origin: ${origin}`);
     return callback(null, true);
