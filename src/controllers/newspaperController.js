@@ -1,17 +1,17 @@
 const supabase = require('../supabase');
 const multer = require('multer');
+const { v4: uuidv4 } = require('uuid');
+const ns = require('../utils/notificationService');
+const { createCopy } = require('../utils/notificationCopy');
 
 const VALID_LANGUAGES = ['english', 'hindi', 'gujarati'];
 const SIGNED_URL_TTL_SECONDS = 60 * 60; // 1 hour — long enough to read, short enough to limit leaks
+const TITLE_MAX = 150;
 
 // Multer — memory storage for Supabase upload
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 exports.upload = upload;
 
-// Best-effort: extract the storage object path from a Supabase public URL.
-// Supabase public URLs look like:
-//   https://<project>.supabase.co/storage/v1/object/public/newspapers/<path>
-// We need just the part inside the bucket: e.g. "newspapers/english/2026-05-09_173...pdf"
 const extractStoragePath = (fileUrl) => {
   if (!fileUrl) return null;
   const marker = '/object/public/newspapers/';
@@ -20,8 +20,6 @@ const extractStoragePath = (fileUrl) => {
   return `newspapers/${fileUrl.substring(idx + marker.length)}`;
 };
 
-// Generate a short-lived signed URL for an uploaded edition. Falls back to the
-// stored URL if signing fails (e.g. legacy rows or storage misconfig).
 const signUploadedUrl = async (edition) => {
   if (!edition || edition.source !== 'upload') return edition?.file_url || null;
   const path = extractStoragePath(edition.file_url);
@@ -37,50 +35,88 @@ const signUploadedUrl = async (edition) => {
   }
 };
 
-// GET /newspapers?date=YYYY-MM-DD&language=english
-exports.getEdition = async (req, res) => {
+const editionTitle = (edition) => {
+  const t = edition?.title?.trim();
+  if (t) return t;
+  const lang = edition?.language || 'english';
+  return `${lang.charAt(0).toUpperCase()}${lang.slice(1)} Edition`;
+};
+
+async function assertNewspaperAccess(req) {
+  if (req.user.role === 'admin') return null;
+  const { data: sub } = await supabase
+    .from('subscriptions')
+    .select('newspaper_addon, newspaper_expires_at, status, expires_at')
+    .eq('user_id', req.user.id)
+    .single();
+
+  const isActive = sub?.status === 'active' && (!sub.expires_at || new Date(sub.expires_at) > new Date());
+  const newsOk = !!sub?.newspaper_addon
+    && (!sub.newspaper_expires_at || new Date(sub.newspaper_expires_at) > new Date());
+  if (!isActive || !newsOk) return { status: 403, error: 'newspaper_addon_required' };
+  return null;
+}
+
+function mapEditionMeta(edition) {
+  return {
+    id: edition.id,
+    title: editionTitle(edition),
+    date: edition.date,
+    language: edition.language,
+    source: edition.source,
+    kind: edition.source === 'upload' ? 'pdf' : 'external',
+    created_at: edition.created_at,
+  };
+}
+
+// GET /newspapers?date=YYYY-MM-DD&language=english — list editions (titles) for date+language
+exports.listEditions = async (req, res) => {
   const { date, language } = req.query;
   if (!date || !language) return res.status(422).json({ error: 'date and language are required' });
   if (!VALID_LANGUAGES.includes(language)) return res.status(422).json({ error: 'Invalid language' });
 
-  // Check newspaper_addon for non-admin users
-  if (req.user.role !== 'admin') {
-    const { data: sub } = await supabase
-      .from('subscriptions')
-      .select('newspaper_addon, newspaper_expires_at, status, expires_at')
-      .eq('user_id', req.user.id)
-      .single();
+  const denied = await assertNewspaperAccess(req);
+  if (denied) return res.status(denied.status).json({ error: denied.error });
 
-    const isActive = sub?.status === 'active' && (!sub.expires_at || new Date(sub.expires_at) > new Date());
-    const newsOk = !!sub?.newspaper_addon
-      && (!sub.newspaper_expires_at || new Date(sub.newspaper_expires_at) > new Date());
-    if (!isActive || !newsOk) {
-      return res.status(403).json({ error: 'newspaper_addon_required' });
-    }
-  }
-
-  // Check manual edition first
-  const { data: edition } = await supabase
+  const { data: editions, error } = await supabase
     .from('newspaper_editions')
-    .select('*')
+    .select('id, title, date, language, source, created_at')
     .eq('date', date)
     .eq('language', language)
+    .order('created_at', { ascending: true });
+
+  if (error) return res.status(400).json({ error: error.message });
+  if (!editions?.length) return res.status(404).json({ error: 'not_available' });
+
+  res.json({
+    date,
+    language,
+    editions: editions.map(mapEditionMeta),
+  });
+};
+
+// GET /newspapers/item/:id — open one edition (signed URL)
+exports.getEditionById = async (req, res) => {
+  const { id } = req.params;
+  if (!id) return res.status(422).json({ error: 'id is required' });
+
+  const denied = await assertNewspaperAccess(req);
+  if (denied) return res.status(denied.status).json({ error: denied.error });
+
+  const { data: edition, error } = await supabase
+    .from('newspaper_editions')
+    .select('*')
+    .eq('id', id)
     .maybeSingle();
 
-  if (edition) {
-    const signedUrl = await signUploadedUrl(edition);
-    return res.json({
-      url: signedUrl,
-      source: edition.source,
-      kind: edition.source === 'upload' ? 'pdf' : 'external',
-      date,
-      language,
-    });
-  }
+  if (error) return res.status(400).json({ error: error.message });
+  if (!edition) return res.status(404).json({ error: 'not_available' });
 
-  // No edition for this date + language — do not fall back to URL patterns.
-  // Each language tab must only show its own uploaded PDF (or empty).
-  res.status(404).json({ error: 'not_available' });
+  const signedUrl = await signUploadedUrl(edition);
+  res.json({
+    ...mapEditionMeta(edition),
+    url: signedUrl,
+  });
 };
 
 // GET /newspapers/available-dates?language=english
@@ -93,21 +129,24 @@ exports.getAvailableDates = async (req, res) => {
   res.json(data || []);
 };
 
-// POST /newspapers — admin upload or URL
+// POST /newspapers — admin upload (always inserts; multiple PDFs per date+language allowed)
 exports.uploadEdition = async (req, res) => {
   const { date, language, url } = req.body;
+  const title = String(req.body.title || '').trim();
   if (!date || !language) return res.status(422).json({ error: 'date and language are required' });
   if (!VALID_LANGUAGES.includes(language)) return res.status(422).json({ error: 'Invalid language' });
+  if (!title) return res.status(422).json({ error: 'title is required' });
+  if (title.length > TITLE_MAX) return res.status(422).json({ error: `title must not exceed ${TITLE_MAX} characters` });
 
   let file_url = url?.trim() || null;
   let source = 'url';
 
   if (req.file) {
-    // Upload to Supabase Storage
-    const fileName = `newspapers/${language}/${date}_${Date.now()}.pdf`;
-    const { data: storageData, error: storageErr } = await supabase.storage
+    // Unique name so multiple PDFs on the same date+language never overwrite each other
+    const fileName = `newspapers/${language}/${date}_${uuidv4()}.pdf`;
+    const { error: storageErr } = await supabase.storage
       .from('newspapers')
-      .upload(fileName, req.file.buffer, { contentType: 'application/pdf', upsert: true });
+      .upload(fileName, req.file.buffer, { contentType: 'application/pdf', upsert: false });
 
     if (storageErr) return res.status(400).json({ error: storageErr.message });
 
@@ -118,28 +157,50 @@ exports.uploadEdition = async (req, res) => {
 
   if (!file_url) return res.status(422).json({ error: 'Either a file or a URL is required' });
 
-  // Upsert — replace existing edition for same date+language
-  const { data: existing } = await supabase
+  const { data: row, error } = await supabase
     .from('newspaper_editions')
-    .select('id')
-    .eq('date', date)
-    .eq('language', language)
-    .maybeSingle();
-
-  let error;
-  if (existing) {
-    ({ error } = await supabase
-      .from('newspaper_editions')
-      .update({ file_url, source, uploaded_by: req.user.id, updated_at: new Date().toISOString() })
-      .eq('id', existing.id));
-  } else {
-    ({ error } = await supabase
-      .from('newspaper_editions')
-      .insert({ date, language, file_url, source, uploaded_by: req.user.id }));
-  }
+    .insert({ date, language, title, file_url, source, uploaded_by: req.user.id })
+    .select('id, title, date, language, source, created_at')
+    .single();
 
   if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json({ message: 'Edition saved', date, language, file_url, source });
+
+  try {
+    const now = new Date();
+    const { data: subs } = await supabase
+      .from('subscriptions')
+      .select('user_id, expires_at, newspaper_expires_at')
+      .eq('newspaper_addon', true)
+      .eq('status', 'active');
+
+    const recipients = [];
+    const seen = new Set();
+    for (const s of subs || []) {
+      if (!s.user_id || seen.has(s.user_id)) continue;
+      const planOk = !s.expires_at || new Date(s.expires_at) > now;
+      const newsOk = !s.newspaper_expires_at || new Date(s.newspaper_expires_at) > now;
+      if (!planOk || !newsOk) continue;
+      seen.add(s.user_id);
+      recipients.push(s.user_id);
+    }
+
+    if (recipients.length) {
+      await Promise.all(recipients.map((user_id) => ns.notifyUser(user_id, {
+        type: 'newspaper',
+        meta: { date, language, edition_id: row.id, title },
+        build: (lang) => createCopy(lang).newspaperEdition(date, language, title),
+      })));
+    }
+  } catch (notifyErr) {
+    console.error('[newspaper] notify subscribers failed:', notifyErr);
+  }
+
+  res.status(201).json({
+    message: 'Edition saved',
+    edition: mapEditionMeta(row),
+    file_url,
+    source,
+  });
 };
 
 // DELETE /newspapers/:id — admin
@@ -153,7 +214,6 @@ exports.deleteEdition = async (req, res) => {
 
   if (!edition) return res.status(404).json({ error: 'Edition not found' });
 
-  // Delete from storage if uploaded
   if (edition.source === 'upload' && edition.file_url) {
     const path = edition.file_url.split('/newspapers/')[1];
     if (path) await supabase.storage.from('newspapers').remove([`newspapers/${path}`]);
@@ -170,9 +230,10 @@ exports.getRecentEditions = async (req, res) => {
     .from('newspaper_editions')
     .select('*')
     .order('date', { ascending: false })
-    .limit(30);
+    .order('created_at', { ascending: false })
+    .limit(60);
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data || []);
+  res.json((data || []).map((e) => ({ ...e, title: editionTitle(e) })));
 };
 
 // GET /newspapers/url-patterns — admin
@@ -184,7 +245,7 @@ exports.getUrlPatterns = async (req, res) => {
 
 // PUT /newspapers/url-patterns — admin
 exports.saveUrlPatterns = async (req, res) => {
-  const { patterns } = req.body; // [{ language, url_pattern }]
+  const { patterns } = req.body;
   if (!Array.isArray(patterns)) return res.status(422).json({ error: 'patterns must be an array' });
 
   for (const p of patterns) {

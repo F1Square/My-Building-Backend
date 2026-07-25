@@ -13,10 +13,11 @@ const COMPLAINT_LIST_SELECT = `id, user_id, building_id, title, description, cat
 const COMPLAINT_MY_LIST_SELECT = 'id, user_id, building_id, title, description, category, status, remark, created_at, updated_at';
 const COMPLAINT_DETAIL_SELECT = `id, user_id, building_id, title, description, category, photo_url, status, remark, created_at, updated_at, users(${USER_FIELDS}), buildings(name)`;
 const COMPLAINT_ADMIN_LIST_SELECT = `id, user_id, building_id, title, description, category, status, remark, created_at, updated_at, users(${USER_FIELDS}), buildings(name)`;
+const MAX_COMPLAINT_PHOTOS = 5;
 
 async function resolveComplaintPhotoUrl(photo_url) {
-  if (!photo_url) return null;
-  if (!photo_url.startsWith('data:image')) return photo_url;
+  if (!photo_url || typeof photo_url !== 'string') return null;
+  if (!photo_url.startsWith('data:image')) return photo_url.startsWith('http') ? photo_url : null;
   try {
     const uploadRes = await uploadImage(photo_url, { folder: 'complaints' });
     return uploadRes.secure_url;
@@ -25,6 +26,42 @@ async function resolveComplaintPhotoUrl(photo_url) {
     // Do not persist raw base64 — keeps DB/payload size bounded
     return null;
   }
+}
+
+/** Accept string | string[] (max 5). Returns hosted HTTPS URLs only. */
+async function resolveComplaintPhotoUrls(photo_url) {
+  let inputs = [];
+  if (photo_url == null || photo_url === '') return [];
+  if (Array.isArray(photo_url)) {
+    inputs = photo_url;
+  } else if (typeof photo_url === 'string') {
+    const trimmed = photo_url.trim();
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        inputs = Array.isArray(parsed) ? parsed : [trimmed];
+      } catch {
+        inputs = [trimmed];
+      }
+    } else {
+      inputs = [trimmed];
+    }
+  } else {
+    return [];
+  }
+
+  const urls = [];
+  for (const item of inputs.slice(0, MAX_COMPLAINT_PHOTOS)) {
+    const url = await resolveComplaintPhotoUrl(item);
+    if (url) urls.push(url);
+  }
+  return urls;
+}
+
+/** Persist one URL as plain string (legacy); multiple as JSON array string. */
+function serializeComplaintPhotos(urls) {
+  if (!urls?.length) return null;
+  return urls.length === 1 ? urls[0] : JSON.stringify(urls);
 }
 
 function validateComplaintFields({ title, description, category, requireTitle = true }) {
@@ -81,7 +118,7 @@ exports.createComplaint = async (req, res) => {
   const fieldError = validateComplaintFields({ title, description, category });
   if (fieldError) return res.status(422).json({ error: fieldError });
 
-  const finalPhotoUrl = await resolveComplaintPhotoUrl(photo_url);
+  const finalPhotoUrls = await resolveComplaintPhotoUrls(photo_url);
   const titleTrimmed = title.trim();
   const resolvedCategory = category || 'General';
 
@@ -93,7 +130,7 @@ exports.createComplaint = async (req, res) => {
       title: titleTrimmed,
       description: description?.trim() || null,
       category: resolvedCategory,
-      photo_url: finalPhotoUrl,
+      photo_url: serializeComplaintPhotos(finalPhotoUrls),
     })
     .select(COMPLAINT_DETAIL_SELECT)
     .single();
@@ -266,7 +303,8 @@ exports.adminUpdateComplaint = async (req, res) => {
   if (status) updates.status = status;
   if (remark !== undefined) updates.remark = remark?.trim() || null;
   if (photo_url !== undefined) {
-    updates.photo_url = await resolveComplaintPhotoUrl(photo_url);
+    const urls = await resolveComplaintPhotoUrls(photo_url);
+    updates.photo_url = serializeComplaintPhotos(urls);
   }
 
   const { data, error } = await supabase
@@ -306,7 +344,7 @@ exports.adminCreateComplaint = async (req, res) => {
   if (fieldError) return res.status(422).json({ error: fieldError });
   if (!building_id) return res.status(422).json({ error: 'building_id is required' });
 
-  const finalPhotoUrl = await resolveComplaintPhotoUrl(photo_url);
+  const finalPhotoUrls = await resolveComplaintPhotoUrls(photo_url);
 
   const { data, error } = await supabase
     .from('complaints')
@@ -314,7 +352,7 @@ exports.adminCreateComplaint = async (req, res) => {
       title: title.trim(),
       description: description?.trim() || null,
       category: category || 'General',
-      photo_url: finalPhotoUrl,
+      photo_url: serializeComplaintPhotos(finalPhotoUrls),
       building_id,
       user_id: user_id || null,
     })

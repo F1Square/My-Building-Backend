@@ -2,7 +2,7 @@ const supabase = require('../supabase');
 const ns = require('../utils/notificationService');
 const { createCopy } = require('../utils/notificationCopy');
 const { uploadImage } = require('../utils/imageUploadHelper');
-const { resolveVisitorFlat, parseBuildingWings } = require('../utils/flatMatchHelper');
+const { resolveVisitorFlat, parseBuildingWings, visitorNotifyRecipientIds } = require('../utils/flatMatchHelper');
 
 const PHONE_RE = /^[6-9]\d{9}$/;
 
@@ -23,7 +23,16 @@ async function resolveVisitorPhotoUrl(photo_url) {
 }
 
 async function notifyVisitorEntry(building_id, visitorId, name, flat_no, purpose, flatResidents) {
-  if (!flatResidents?.length) return;
+  const { data: pramukhs } = await supabase
+    .from('users')
+    .select('id')
+    .eq('building_id', building_id)
+    .eq('role', 'pramukh')
+    .eq('status', 'approved');
+
+  const recipientIds = visitorNotifyRecipientIds(flatResidents, pramukhs);
+  if (!recipientIds.length) return;
+
   const purposeText = purpose?.trim() || null;
   await ns.notifyMembers(
     building_id,
@@ -32,7 +41,7 @@ async function notifyVisitorEntry(building_id, visitorId, name, flat_no, purpose
       meta: { visitor_id: visitorId, flat_no },
       build: (lang) => createCopy(lang).visitorAtDoor(name, flat_no, purposeText),
     },
-    flatResidents.map((r) => r.id),
+    recipientIds,
   );
 }
 

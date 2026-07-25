@@ -3,17 +3,84 @@ const ns = require('../utils/notificationService');
 const { createCopy } = require('../utils/notificationCopy');
 const { uploadImage } = require('../utils/imageUploadHelper');
 const { singleImageUpload, requireFile } = require('../middleware/imageUpload');
-const { formatVisitorFlatLabel } = require('../utils/flatMatchHelper');
+const { buildVisitorFlatLabels, resolveVisitorFlat, visitorNotifyRecipientIds } = require('../utils/flatMatchHelper');
 
-function visitorFlatLabelsForUser(user) {
-  const flat = user?.flat_no?.trim();
-  if (!flat) return [];
-  const labels = new Set([flat]);
-  const wing = user?.wing?.trim();
-  if (wing && wing !== 'Building-Wide') {
-    labels.add(formatVisitorFlatLabel(wing, flat, true));
+/**
+ * Load flat/wing from DB (JWT often omits wing) then build match labels.
+ */
+async function visitorFlatLabelsForUser(user) {
+  if (!user?.id && !user?.flat_no) return [];
+
+  let flat = String(user.flat_no || '').trim();
+  let wing = String(user.wing || '').trim();
+
+  if (user.id) {
+    const { data } = await supabase
+      .from('users')
+      .select('flat_no, wing')
+      .eq('id', user.id)
+      .maybeSingle();
+    if (data) {
+      flat = String(data.flat_no || flat || '').trim();
+      wing = String(data.wing || wing || '').trim();
+    }
   }
-  return [...labels];
+
+  return buildVisitorFlatLabels(flat, wing);
+}
+
+async function loadBuildingPramukhIds(building_id) {
+  const { data } = await supabase
+    .from('users')
+    .select('id')
+    .eq('building_id', building_id)
+    .eq('role', 'pramukh')
+    .eq('status', 'approved');
+  return data || [];
+}
+
+/** Notify only target-flat residents + society pramukhs (never other flats). */
+async function notifyWatchmanVisitor(building_id, visitorId, name, flat_no, purpose) {
+  const label = String(flat_no || '').trim();
+  let wing = '';
+  let flatNum = label;
+  const dash = label.lastIndexOf('-');
+  if (dash > 0) {
+    wing = label.slice(0, dash).trim();
+    flatNum = label.slice(dash + 1).trim() || label;
+  }
+
+  const { data: building } = await supabase
+    .from('buildings')
+    .select('id, has_wings, wings')
+    .eq('id', building_id)
+    .maybeSingle();
+
+  let residents = [];
+  if (building) {
+    const resolved = await resolveVisitorFlat(
+      supabase,
+      building_id,
+      building,
+      wing || (building.has_wings ? null : ''),
+      flatNum,
+    );
+    if (!resolved.error) residents = resolved.residents || [];
+  }
+
+  const pramukhs = await loadBuildingPramukhIds(building_id);
+  const recipientIds = visitorNotifyRecipientIds(residents, pramukhs);
+  if (!recipientIds.length) return;
+
+  await ns.notifyMembers(
+    building_id,
+    {
+      type: 'visitor',
+      meta: { visitor_id: visitorId, flat_no: label },
+      build: (lang) => createCopy(lang).visitorWatchman(name, flat_no, purpose),
+    },
+    recipientIds,
+  );
 }
 
 // Upload visitor photo to Cloudinary
@@ -77,11 +144,11 @@ exports.addVisitor = async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
 
-  await ns.notifyMembers(building_id, {
-    type: 'visitor',
-    meta: { visitor_id: data.id },
-    build: (lang) => createCopy(lang).visitorWatchman(name, flat_no, purpose),
-  });
+  try {
+    await notifyWatchmanVisitor(building_id, data.id, name, flat_no, purpose);
+  } catch (err) {
+    console.error('Watchman visitor notify failed:', err.message || err);
+  }
 
   res.status(201).json({ message: 'Visitor logged', visitor: data });
 };
@@ -113,9 +180,9 @@ exports.getVisitors = async (req, res) => {
     .order('created_at', { ascending: false })
     .limit(500);
 
-  // Users only see visitors that came to their own flat
+  // Users only see visitors that came to their own flat (not other flats)
   if (isUser) {
-    const flatLabels = visitorFlatLabelsForUser(req.user);
+    const flatLabels = await visitorFlatLabelsForUser(req.user);
     if (!flatLabels.length) return res.json([]);
     q = q.in('flat_no', flatLabels);
   }
@@ -155,7 +222,7 @@ exports.getVisitorDates = async (req, res) => {
 
   // Users only see dates for their own flat's visitors
   if (isUser) {
-    const flatLabels = visitorFlatLabelsForUser(req.user);
+    const flatLabels = await visitorFlatLabelsForUser(req.user);
     if (!flatLabels.length) return res.json({ dates: [] });
     q = q.in('flat_no', flatLabels);
   }

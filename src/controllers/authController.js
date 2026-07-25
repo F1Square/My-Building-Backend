@@ -19,6 +19,8 @@ const getSubscription = async (user_id) => {
 const signToken = (payload) =>
   jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
 
+const tokenVersionOf = (user) => Number(user?.token_version ?? 0);
+
 // Get current user (refresh profile/building_id after approval)
 exports.getMe = async (req, res) => {
   const { data, error } = await supabase
@@ -67,7 +69,7 @@ exports.unifiedLogin = async (req, res) => {
     // Ensure admin has a real UUID row in users table
     let { data: adminUser } = await supabase
       .from('users')
-      .select('id, name, email, role, password_hash')
+      .select('id, name, email, role, password_hash, token_version')
       .eq('email', normalizedEmail)
       .single();
 
@@ -87,8 +89,8 @@ exports.unifiedLogin = async (req, res) => {
     if (!adminUser) {
       const { data: created, error: createErr } = await supabase
         .from('users')
-        .insert({ name: 'Admin', email: normalizedEmail, role: 'admin', status: 'approved', password_hash: 'admin-no-direct-login' })
-        .select('id, name, email, role')
+        .insert({ name: 'Admin', email: normalizedEmail, role: 'admin', status: 'approved', password_hash: 'admin-no-direct-login', token_version: 0 })
+        .select('id, name, email, role, token_version')
         .single();
       if (createErr) return res.status(500).json({ error: 'Failed to create admin record: ' + createErr.message });
       adminUser = created;
@@ -97,7 +99,13 @@ exports.unifiedLogin = async (req, res) => {
     if (!adminUser) return res.status(500).json({ error: 'Admin record could not be resolved' });
 
     logActivity({ id: adminUser.id, name: 'Admin', role: 'admin' }, 'login_success', 'auth', {}, req.ip, 'info');
-    const token = signToken({ id: adminUser.id, role: 'admin', name: 'Admin', email: normalizedEmail });
+    const token = signToken({
+      id: adminUser.id,
+      role: 'admin',
+      name: 'Admin',
+      email: normalizedEmail,
+      tv: tokenVersionOf(adminUser),
+    });
     return res.json({ token, user: { id: adminUser.id, name: 'Admin', email: normalizedEmail, role: 'admin' } });
   }
 
@@ -121,7 +129,15 @@ exports.unifiedLogin = async (req, res) => {
 
   const displayName = userDisplayName(data);
   logActivity({ id: data.id, name: displayName, email: data.email, role: data.role, building_id: data.building_id }, 'login_success', 'auth', {}, req.ip, 'info');
-  const token = signToken({ id: data.id, role: data.role, name: displayName, email: data.email, building_id: data.building_id, flat_no: data.flat_no });
+  const token = signToken({
+    id: data.id,
+    role: data.role,
+    name: displayName,
+    email: data.email,
+    building_id: data.building_id,
+    flat_no: data.flat_no,
+    tv: tokenVersionOf(data),
+  });
   const subscription = await getSubscription(data.id);
   return res.json({
     token,
@@ -179,7 +195,14 @@ exports.fixedLogin = async (req, res) => {
 
   const displayName = userDisplayName(data);
   return res.json({
-    token: signToken({ id: data.id, role: 'pramukh', name: displayName, email: data.email, building_id: data.building_id }),
+    token: signToken({
+      id: data.id,
+      role: 'pramukh',
+      name: displayName,
+      email: data.email,
+      building_id: data.building_id,
+      tv: tokenVersionOf(data),
+    }),
     subscription: await getSubscription(data.id),
     user: { id: data.id, name: displayName, email: data.email, role: 'pramukh', building_id: data.building_id, phone: data.phone, wing: data.wing, total_members: data.total_members }
   });
@@ -243,7 +266,14 @@ exports.login = async (req, res) => {
   const displayName = userDisplayName(data);
   logActivity({ id: data.id, name: displayName, email: data.email, role: data.role, building_id: data.building_id }, 'login_success', 'auth', {}, req.ip, 'info');
   res.json({
-    token: signToken({ id: data.id, role: data.role, name: displayName, email: data.email, building_id: data.building_id }),
+    token: signToken({
+      id: data.id,
+      role: data.role,
+      name: displayName,
+      email: data.email,
+      building_id: data.building_id,
+      tv: tokenVersionOf(data),
+    }),
     subscription: await getSubscription(data.id),
     user: { id: data.id, name: displayName, email: data.email, role: data.role, building_id: data.building_id, flat_no: data.flat_no, phone: data.phone, wing: data.wing, total_members: data.total_members }
   });
@@ -406,7 +436,7 @@ exports.resetPassword = async (req, res) => {
   // disappeared between OTP and reset, recreate it for the admin email.
   const { data: existing } = await supabase
     .from('users')
-    .select('id')
+    .select('id, token_version')
     .eq('email', payload.email)
     .maybeSingle();
 
@@ -414,14 +444,28 @@ exports.resetPassword = async (req, res) => {
     if (payload.email === process.env.ADMIN_EMAIL?.toLowerCase().trim()) {
       const { error: insErr } = await supabase
         .from('users')
-        .insert({ name: 'Admin', email: payload.email, role: 'admin', status: 'approved', password_hash: hash });
+        .insert({
+          name: 'Admin',
+          email: payload.email,
+          role: 'admin',
+          status: 'approved',
+          password_hash: hash,
+          token_version: 1,
+        });
       if (insErr) return res.status(500).json({ error: 'Failed to update password' });
       return res.json({ message: 'Password reset successfully. You can now log in.' });
     }
     return res.status(404).json({ error: 'Account no longer exists. Please start the reset flow again.' });
   }
 
-  const { error } = await supabase.from('users').update({ password_hash: hash }).eq('email', payload.email);
+  // Bump token_version so JWTs issued before this reset are rejected on other devices.
+  const { error } = await supabase
+    .from('users')
+    .update({
+      password_hash: hash,
+      token_version: Number(existing.token_version ?? 0) + 1,
+    })
+    .eq('email', payload.email);
   if (error) return res.status(500).json({ error: 'Failed to update password' });
 
   res.json({ message: 'Password reset successfully. You can now log in.' });

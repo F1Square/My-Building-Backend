@@ -63,10 +63,33 @@ function mapRowsWithDisplayUsers(rows, userKeys = ['users']) {
   });
 }
 
+function parseComplaintPhotos(photo_url) {
+  if (!photo_url) return [];
+  if (Array.isArray(photo_url)) {
+    return photo_url.filter((u) => typeof u === 'string' && u.trim()).slice(0, 5);
+  }
+  if (typeof photo_url !== 'string') return [];
+  const trimmed = photo_url.trim();
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((u) => typeof u === 'string' && u.trim()).slice(0, 5);
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return trimmed ? [trimmed] : [];
+}
+
 function mapComplaint(complaint) {
   if (!complaint) return complaint;
+  const photo_urls = parseComplaintPhotos(complaint.photo_url);
   return {
     ...complaint,
+    photo_url: photo_urls[0] || null,
+    photo_urls,
     users: complaint.users ? withDisplayUser(complaint.users) : complaint.users,
   };
 }

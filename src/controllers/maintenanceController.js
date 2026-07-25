@@ -8,6 +8,7 @@ const { getPaymentCallbackUrl } = require('../utils/backendUrl');
 const { logActivity } = require('../utils/activityLogger');
 const { computeMaintenancePayable } = require('../utils/maintenancePayable');
 const { withDisplayUser, userDisplayName, mapRowsWithDisplayUsers } = require('../utils/userDisplayName');
+const { normalizeBankWing, pickBankDetailsForWing } = require('../utils/validators');
 
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -124,10 +125,17 @@ exports.addBill = async (req, res) => {
             status: 'pending', category: 'water_meter',
           }))
         );
+      }
+
+      // Same as maintenance bills: notify every approved society member (not only billed roles).
+      try {
         await ns.notifyMembers(building_id, {
-          type: 'bill', meta: { bill_id: bill.id },
+          type: 'bill',
+          meta: { bill_id: bill.id, category: 'water_meter' },
           build: (lang) => createCopy(lang).waterBillUniform(parsedAmount, due_date),
         });
+      } catch (notifyErr) {
+        console.error('[water_meter] uniform notify failed:', notifyErr);
       }
       return res.status(201).json({ message: 'Water meter bill added', bill });
     }
@@ -163,14 +171,26 @@ exports.addBill = async (req, res) => {
       }))
     );
 
-    const notifiedUsers = new Set();
+    // Notify all approved society members; billed users get their flat amount in the copy.
+    const amountByUser = new Map();
     for (const entry of flat_amounts) {
-      if (notifiedUsers.has(entry.user_id)) continue;
-      notifiedUsers.add(entry.user_id);
-      await ns.notifyUser(entry.user_id, {
-        type: 'bill', meta: { bill_id: bill.id },
-        build: (lang) => createCopy(lang).waterBillFlat(entry.amount, due_date),
-      });
+      if (!amountByUser.has(entry.user_id)) amountByUser.set(entry.user_id, parseFloat(entry.amount));
+    }
+    const { data: allMembers } = await supabase
+      .from('users').select('id').eq('building_id', building_id).eq('status', 'approved');
+    try {
+      await Promise.all((allMembers || []).map((m) => {
+        const amt = amountByUser.get(m.id);
+        return ns.notifyUser(m.id, {
+          type: 'bill',
+          meta: { bill_id: bill.id, category: 'water_meter' },
+          build: (lang) => (amt != null
+            ? createCopy(lang).waterBillFlat(amt, due_date)
+            : createCopy(lang).waterBillUniform(totalSum, due_date)),
+        });
+      }));
+    } catch (notifyErr) {
+      console.error('[water_meter] flat_wise notify failed:', notifyErr);
     }
     return res.status(201).json({ message: 'Water meter bill added', bill });
   }
@@ -668,7 +688,7 @@ exports.createPaymentOrder = async (req, res) => {
   // Fetch payment record with bill, user, and building info
   const { data: record, error: recErr } = await supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(amount, month, year, due_date, description, category, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, phone, email, id), buildings(name, address)')
+    .select('*, maintenance_bills(amount, month, year, due_date, description, category, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, phone, email, id, wing), buildings(name, address)')
     .eq('id', payment_record_id).eq('user_id', req.user.id).single();
 
   if (recErr || !record) return res.status(404).json({ error: 'Payment record not found' });
@@ -676,6 +696,14 @@ exports.createPaymentOrder = async (req, res) => {
 
   // Same formula as My Bill / getPaymentRecords (base + overdue maintenance penalty)
   const { baseAmount, penaltyAmount, totalAmount, isOverdue } = computeMaintenancePayable(record);
+
+  // Resolve wing bank (A-102 → A wing account only — buildings always have wings)
+  const settlementWing = normalizeBankWing(record.users?.wing || req.user?.wing);
+  const { data: bankRows } = await supabase
+    .from('building_bank_details')
+    .select('wing, bank_name, bank_account, bank_ifsc, beneficiary_name, razorpay_account_id')
+    .eq('building_id', record.building_id);
+  const settlementBank = pickBankDetailsForWing(bankRows || [], settlementWing);
 
   // Freeze charged total + applied penalty for this checkout (do not wipe configured fee as 0 before due)
   await supabase.from('maintenance_payments')
@@ -711,8 +739,8 @@ exports.createPaymentOrder = async (req, res) => {
       udf2: record.users?.id || req.user.id,
       udf3: record.building_id,
       udf4: 'maintenance',
-      // building_id is already in udf3; use simple label (Easebuzz rejects ':' and long markers in udf5).
-      udf5: 'maintenance',
+      // Tag settlement wing for gateway / reconciliation (alphanumeric only)
+      udf5: settlementWing,
     });
 
     await supabase.from('maintenance_payments')
@@ -728,7 +756,13 @@ exports.createPaymentOrder = async (req, res) => {
       payment_record_id,
       society_name: record.buildings?.name,
       is_overdue: isOverdue,
-      settlement_target: 'society',
+      settlement_target: settlementWing,
+      settlement_bank: settlementBank ? {
+        wing: normalizeBankWing(settlementBank.wing),
+        bank_name: settlementBank.bank_name,
+        beneficiary_name: settlementBank.beneficiary_name,
+        merchant_id: settlementBank.razorpay_account_id || null,
+      } : null,
     });
   } catch (err) {
     console.error('Easebuzz order error:', err);
@@ -1151,16 +1185,18 @@ exports.getTransferStatus = async (req, res) => {
       .order('paid_at', { ascending: false })
       .limit(20);
 
-    // Get bank details
-    const { data: bankDetails } = await supabase
+    // Get bank details for the requested wing (exact match)
+    const wing = normalizeBankWing(req.query.wing);
+    const { data: bankRows } = await supabase
       .from('building_bank_details')
-      .select('razorpay_account_id, bank_name, bank_account')
-      .eq('building_id', building_id)
-      .single();
+      .select('wing, razorpay_account_id, bank_name, bank_account, bank_ifsc, beneficiary_name')
+      .eq('building_id', building_id);
+    const bankDetails = pickBankDetailsForWing(bankRows || [], wing);
 
     res.json({
       payments: mapRowsWithDisplayUsers(payments || []),
       bank_details: bankDetails,
+      settlement_wing: wing,
       summary: {
         total_payments: payments?.length || 0,
         successful_transfers: payments?.filter(p => p.razorpay_transfer_id).length || 0,

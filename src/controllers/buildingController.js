@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const ns = require('../utils/notificationService');
 const { createCopy } = require('../utils/notificationCopy');
 const { userDisplayName, withDisplayUser, mapRowsWithDisplayUsers } = require('../utils/userDisplayName');
+const { normalizeBankWing } = require('../utils/validators');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_RE = /^[6-9]\d{9}$/;
@@ -339,16 +340,18 @@ exports.getPendingRequests = async (req, res) => {
   res.json(mapRowsWithDisplayUsers(data ?? []));
 };
 
-// Admin: get bank details for a building
+// Admin: get bank details for a building (legacy stub — overwritten by wing-aware export below)
 exports.getBankDetails = async (req, res) => {
   const building_id = req.user.building_id || req.query.building_id;
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
+  const wing = normalizeBankWing(req.query.wing);
   const { data, error } = await supabase
     .from('building_bank_details')
     .select('*')
     .eq('building_id', building_id)
-    .single();
-  if (error && error.code !== 'PGRST116') return res.status(400).json({ error: error.message });
+    .eq('wing', wing)
+    .maybeSingle();
+  if (error) return res.status(400).json({ error: error.message });
   res.json(data || {});
 };
 
@@ -555,29 +558,33 @@ exports.adminDeleteUser = async (req, res) => {
 
 // ── Bank Details ─────────────────────────────────────────────────────────────
 
-// GET /buildings/bank-details
+// GET /buildings/bank-details?building_id=&wing=
 exports.getBankDetails = async (req, res) => {
   const building_id = req.query.building_id || req.user.building_id;
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
 
+  const wing = normalizeBankWing(req.query.wing);
   const { data, error } = await supabase
     .from('building_bank_details')
     .select('*')
     .eq('building_id', building_id)
+    .eq('wing', wing)
     .maybeSingle();
 
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data || {});
+  res.json(data || { wing });
 };
 
-// POST /buildings/bank-details
+// POST /buildings/bank-details  (body: building_id, wing, bank fields…)
 exports.saveBankDetails = async (req, res) => {
   const building_id = req.body.building_id || req.user.building_id;
   if (!building_id) return res.status(400).json({ error: 'building_id is required' });
 
   const {
-    bank_name, bank_ifsc, bank_account, beneficiary_name, razorpay_account_id
+    bank_name, bank_ifsc, bank_account, beneficiary_name, razorpay_account_id,
+    bank_branch, contact_name, contact_email, contact_mobile,
   } = req.body;
+  const wing = normalizeBankWing(req.body.wing);
 
   if (!bank_account?.trim() || !bank_ifsc?.trim())
     return res.status(422).json({ error: 'Account number and IFSC are required' });
@@ -588,17 +595,22 @@ exports.saveBankDetails = async (req, res) => {
 
   const payload = {
     building_id,
+    wing,
     bank_name: bank_name?.trim() || null,
+    bank_branch: bank_branch?.trim() || null,
     bank_ifsc: ifsc,
     bank_account: bank_account.trim(),
     beneficiary_name: beneficiary_name?.trim() || null,
+    contact_name: contact_name?.trim() || null,
+    contact_email: contact_email?.trim() || null,
+    contact_mobile: contact_mobile?.trim() || null,
     razorpay_account_id: razorpay_account_id?.trim() || null,
     updated_at: new Date().toISOString(),
   };
 
   const { error } = await supabase
     .from('building_bank_details')
-    .upsert(payload, { onConflict: 'building_id' });
+    .upsert(payload, { onConflict: 'building_id,wing' });
 
   if (error) return res.status(400).json({ error: error.message });
   res.json({ message: 'Bank details saved', ...payload });

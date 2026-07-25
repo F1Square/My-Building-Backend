@@ -156,6 +156,13 @@ function createCopy(lang) {
       societyRuleTitle: '📖 New Society Rule',
       societyRuleUpdatedTitle: '📖 Society Rule Updated',
       societyRuleBody: (title, category, by) => `${title} (${category}) — by ${by}`,
+      newspaperTitle: '📰 New Newspaper Available',
+      newspaperBody: (date, language, paperTitle) => paperTitle
+        ? `"${paperTitle}" (${language}) for ${date} is ready. Open Newspaper to read.`
+        : `The ${language} edition for ${date} is ready. Open Newspaper to read.`,
+      newspaperLangEnglish: 'English',
+      newspaperLangHindi: 'Hindi',
+      newspaperLangGujarati: 'Gujarati',
     },
     hi: {
       announcementTitle: 'नई घोषणा जोड़ी गई',
@@ -234,6 +241,13 @@ function createCopy(lang) {
       societyRuleTitle: '📖 नया सोसायटी नियम',
       societyRuleUpdatedTitle: '📖 सोसायटी नियम अपडेट',
       societyRuleBody: (title, category, by) => `${title} (${category}) — द्वारा ${by}`,
+      newspaperTitle: '📰 नया अखबार उपलब्ध',
+      newspaperBody: (date, language, paperTitle) => paperTitle
+        ? `"${paperTitle}" (${language}) — ${date} पढ़ने के लिए तैयार है। अखबार खोलें।`
+        : `${date} का ${language} संस्करण पढ़ने के लिए तैयार है। अखबार खोलें।`,
+      newspaperLangEnglish: 'अंग्रेज़ी',
+      newspaperLangHindi: 'हिन्दी',
+      newspaperLangGujarati: 'गुजराती',
     },
     gu: {
       announcementTitle: 'નવી જાહેરાત ઉમેરાઈ',
@@ -312,6 +326,13 @@ function createCopy(lang) {
       societyRuleTitle: '📖 નવો સોસાયટી નિયમ',
       societyRuleUpdatedTitle: '📖 સોસાયટી નિયમ અપડેટ',
       societyRuleBody: (title, category, by) => `${title} (${category}) — દ્વારા ${by}`,
+      newspaperTitle: '📰 નવું અખબાર ઉપલબ્ધ',
+      newspaperBody: (date, language, paperTitle) => paperTitle
+        ? `"${paperTitle}" (${language}) — ${date} વાંચવા તૈયાર છે. અખબાર ખોલો.`
+        : `${date} નું ${language} સંસ્કરણ વાંચવા તૈયાર છે. અખબાર ખોલો.`,
+      newspaperLangEnglish: 'અંગ્રેજી',
+      newspaperLangHindi: 'હિન્દી',
+      newspaperLangGujarati: 'ગુજરાતી',
     },
   }[L];
 
@@ -332,6 +353,18 @@ function createCopy(lang) {
       title: isUpdate ? t.societyRuleUpdatedTitle : t.societyRuleTitle,
       body: t.societyRuleBody(title, category || 'General', byName || 'Pramukh'),
     }),
+
+    newspaperEdition: (date, language, paperTitle) => {
+      const langLabel = ({
+        english: t.newspaperLangEnglish,
+        hindi: t.newspaperLangHindi,
+        gujarati: t.newspaperLangGujarati,
+      })[language] || language;
+      return {
+        title: t.newspaperTitle,
+        body: t.newspaperBody(formatDueDate(date), langLabel, paperTitle),
+      };
+    },
 
     maintenanceBill: (amount, month, year, dueDate, penalty) => {
       const period = monthYear(month, year);

@@ -33,6 +33,21 @@ exports.isPositive = (v, field) => (v !== undefined && (isNaN(v) || Number(v) <=
 exports.inRange = (min, max) => (v, field) => (v !== undefined && (Number(v) < min || Number(v) > max)) ? `${field} must be between ${min} and ${max}` : null;
 exports.isVehicle = (v, field) => (v && !VEHICLE_RE.test(v?.toUpperCase())) ? `${field} must be a valid vehicle number (e.g. GJ01AB1234)` : null;
 exports.isFutureDate = (v, field) => (v && new Date(v) <= new Date()) ? `${field} must be a future date` : null;
+
+/** Trim wing label — buildings always have named wings (A, B, …). */
+exports.normalizeBankWing = (wing) => String(wing || '').trim();
+
+/**
+ * Exact wing bank row only (no Building-Wide fallback).
+ * rows: [{ wing, ...bank fields }]
+ */
+exports.pickBankDetailsForWing = (rows, wing) => {
+  const list = Array.isArray(rows) ? rows : [];
+  const target = exports.normalizeBankWing(wing);
+  if (!target) return null;
+  return list.find((r) => exports.normalizeBankWing(r?.wing) === target) || null;
+};
+
 exports.isStrongPassword = (v, field) => {
   if (!v) return null;
   if (v.length < 8) return `${field || 'Password'} must be at least 8 characters`;

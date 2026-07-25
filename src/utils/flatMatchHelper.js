@@ -32,6 +32,61 @@ function isBuildingWideWing(wing) {
 }
 
 /**
+ * Flat labels this resident may match on visitors.flat_no.
+ * With wing A + flat 102 → ["A-102"] (not bare "102", so B-102 never matches A-102).
+ * Without wing → [flat] as stored.
+ */
+function buildVisitorFlatLabels(flat, wing) {
+  flat = normalizeToken(flat);
+  wing = normalizeToken(wing);
+  if (!flat) return [];
+
+  const labels = new Set();
+
+  if (wing && !isBuildingWideWing(wing)) {
+    let flatNum = flat;
+    const dash = flat.lastIndexOf('-');
+    if (dash > 0) {
+      const maybeWing = flat.slice(0, dash);
+      const maybeNum = flat.slice(dash + 1).trim();
+      if (maybeNum && normalizeWing(maybeWing) === normalizeWing(wing)) {
+        flatNum = maybeNum;
+        labels.add(flat);
+      }
+    }
+    labels.add(formatVisitorFlatLabel(wing, flatNum, true));
+  } else {
+    labels.add(flat);
+  }
+
+  return [...labels];
+}
+
+/** True if this visitor row belongs to the resident's wing+flat (case-insensitive). */
+function visitorEntryVisibleToUser(entryFlatNo, userFlat, userWing) {
+  const entry = normalizeToken(entryFlatNo).toLowerCase();
+  if (!entry) return false;
+  return buildVisitorFlatLabels(userFlat, userWing).some(
+    (label) => normalizeToken(label).toLowerCase() === entry,
+  );
+}
+
+/**
+ * Who gets visitor push/in-app notify: target-flat residents + society pramukhs.
+ * Other flat users (e.g. B-102 when visit is A-102) are never included.
+ */
+function visitorNotifyRecipientIds(flatResidents, buildingPramukhs) {
+  const ids = new Set();
+  for (const r of flatResidents || []) {
+    if (r?.id) ids.add(r.id);
+  }
+  for (const p of buildingPramukhs || []) {
+    if (p?.id) ids.add(p.id);
+  }
+  return [...ids];
+}
+
+/**
  * Strict wing + flat validation against registered residents.
  * Returns { residents, error, flatLabel }.
  */
@@ -88,7 +143,12 @@ async function resolveVisitorFlat(supabase, building_id, building, wing, flatNo)
 module.exports = {
   WRONG_FLAT_ERROR,
   normalizeToken,
+  normalizeWing,
   parseBuildingWings,
   formatVisitorFlatLabel,
+  isBuildingWideWing,
+  buildVisitorFlatLabels,
+  visitorEntryVisibleToUser,
+  visitorNotifyRecipientIds,
   resolveVisitorFlat,
 };
