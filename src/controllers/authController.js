@@ -10,7 +10,7 @@ const { userDisplayName, withDisplayUser } = require('../utils/userDisplayName')
 const getSubscription = async (user_id) => {
   const { data } = await supabase
     .from('subscriptions')
-    .select('plan, status, expires_at')
+    .select('plan, status, expires_at, newspaper_addon, newspaper_expires_at')
     .eq('user_id', user_id)
     .single();
   return data || null;
