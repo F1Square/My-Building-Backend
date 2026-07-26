@@ -72,6 +72,57 @@ exports.uploadQRPhoto = async (req, res) => {
 };
 
 // ============================================================
+// ADMIN: Delete QR photo for a society (clears buildings.photos)
+// Users/pramukh read the same column, so they stop seeing it too.
+// ============================================================
+exports.deleteQRPhoto = async (req, res) => {
+  try {
+    const { building_id } = req.params;
+
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can delete QR photos' });
+    }
+
+    if (!building_id) {
+      return res.status(400).json({ error: 'Building ID is required' });
+    }
+
+    const { data: buildings, error: lookupError } = await supabase
+      .from('buildings')
+      .select('id, photos')
+      .eq('id', building_id);
+
+    if (lookupError) {
+      console.error('Building lookup error:', lookupError);
+      return res.status(400).json({ error: lookupError.message });
+    }
+
+    if (!buildings || buildings.length === 0) {
+      return res.status(404).json({ error: 'Building not found' });
+    }
+
+    if (!buildings[0].photos) {
+      return res.status(404).json({ error: 'No QR photo found for this building' });
+    }
+
+    const { error: updateError } = await supabase
+      .from('buildings')
+      .update({ photos: null })
+      .eq('id', building_id);
+
+    if (updateError) {
+      console.error('Delete QR photo error:', updateError);
+      return res.status(400).json({ error: updateError.message });
+    }
+
+    res.json({ message: 'QR photo deleted successfully', building_id });
+  } catch (error) {
+    console.error('QR photo delete error:', error);
+    res.status(500).json({ error: error.message || 'Failed to delete QR photo' });
+  }
+};
+
+// ============================================================
 // Get QR photo for a building
 // ============================================================
 exports.getQRPhoto = async (req, res) => {

@@ -17,7 +17,8 @@ const extractStoragePath = (fileUrl) => {
   const marker = '/object/public/newspapers/';
   const idx = fileUrl.indexOf(marker);
   if (idx === -1) return null;
-  return `newspapers/${fileUrl.substring(idx + marker.length)}`;
+  // Path within the `newspapers` bucket (do not prefix the bucket name again)
+  return fileUrl.substring(idx + marker.length);
 };
 
 const signUploadedUrl = async (edition) => {
@@ -215,8 +216,8 @@ exports.deleteEdition = async (req, res) => {
   if (!edition) return res.status(404).json({ error: 'Edition not found' });
 
   if (edition.source === 'upload' && edition.file_url) {
-    const path = edition.file_url.split('/newspapers/')[1];
-    if (path) await supabase.storage.from('newspapers').remove([`newspapers/${path}`]);
+    const path = extractStoragePath(edition.file_url);
+    if (path) await supabase.storage.from('newspapers').remove([path]);
   }
 
   const { error } = await supabase.from('newspaper_editions').delete().eq('id', id);

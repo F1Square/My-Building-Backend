@@ -3,6 +3,7 @@ const { authenticate, requireRole } = require('../middleware/auth');
 const { singleImageUpload, requireFile } = require('../middleware/imageUpload');
 const {
   uploadQRPhoto,
+  deleteQRPhoto,
   getQRPhoto,
   recordQRShare
 } = require('../controllers/qrPhotoController');
@@ -20,6 +21,17 @@ router.post(
   ...singleImageUpload('photo'),
   requireFile,
   uploadQRPhoto
+);
+
+// ============================================================
+// Admin: Delete QR photo for a society
+// Authenticated, admin only
+// ============================================================
+router.delete(
+  '/:building_id',
+  authenticate,
+  requireRole('admin'),
+  deleteQRPhoto
 );
 
 // ============================================================

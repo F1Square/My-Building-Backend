@@ -1,12 +1,26 @@
 /**
  * Shared payable total for maintenance payment records.
  * Matches My Bill (BillCard): base = record.amount; add bill penalty only when
- * category is maintenance and due_date has passed.
+ * category is maintenance and the calendar day AFTER due_date has begun
+ * (due date itself remains penalty-free).
  */
 
+/** True only when today's local calendar date is strictly after the due date. */
 function isDueDatePassed(dueDate) {
   if (!dueDate) return false;
-  return new Date(dueDate) < new Date();
+  const raw = String(dueDate).slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  let dueDay;
+  if (m) {
+    dueDay = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  } else {
+    const d = new Date(dueDate);
+    if (Number.isNaN(d.getTime())) return false;
+    dueDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  }
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return today > dueDay;
 }
 
 /**
