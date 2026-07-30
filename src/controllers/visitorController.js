@@ -5,6 +5,17 @@ const { uploadImage } = require('../utils/imageUploadHelper');
 const { singleImageUpload, requireFile } = require('../middleware/imageUpload');
 const { buildVisitorFlatLabels, resolveVisitorFlat, visitorNotifyRecipientIds } = require('../utils/flatMatchHelper');
 
+/** Calendar date YYYY-MM-DD in Asia/Kolkata (matches en-IN display in the app). */
+function istDateString(d = new Date()) {
+  return new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+/** UTC bounds for one IST calendar day (avoids night entries landing on the previous UTC day). */
+function istDayRangeUtc(dateStr) {
+  const start = new Date(`${dateStr}T00:00:00+05:30`);
+  const end = new Date(`${dateStr}T23:59:59.999+05:30`);
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
+}
 /**
  * Load flat/wing from DB (JWT often omits wing) then build match labels.
  */
@@ -164,7 +175,8 @@ exports.getVisitors = async (req, res) => {
     if (req.user.role === 'admin') {
       let q = supabase.from('visitors').select('*').order('created_at', { ascending: false }).limit(500);
       if (date) {
-        q = q.gte('created_at', `${date}T00:00:00.000Z`).lte('created_at', `${date}T23:59:59.999Z`);
+        const { startIso, endIso } = istDayRangeUtc(date);
+        q = q.gte('created_at', startIso).lte('created_at', endIso);
       }
       const { data, error } = await q;
       if (error) return res.status(400).json({ error: error.message });
@@ -188,7 +200,8 @@ exports.getVisitors = async (req, res) => {
   }
 
   if (date) {
-    q = q.gte('created_at', `${date}T00:00:00.000Z`).lte('created_at', `${date}T23:59:59.999Z`);
+    const { startIso, endIso } = istDayRangeUtc(date);
+    q = q.gte('created_at', startIso).lte('created_at', endIso);
   }
 
   const { data, error } = await q;
@@ -207,16 +220,17 @@ exports.getVisitorDates = async (req, res) => {
   if (isNaN(m) || m < 1 || m > 12) return res.status(422).json({ error: 'month must be between 1 and 12' });
   if (isNaN(y) || y < 2000 || y > 2100) return res.status(422).json({ error: 'year must be a valid year' });
 
-  const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
-  const endMonth = parseInt(month) === 12 ? 1 : parseInt(month) + 1;
-  const endYear = parseInt(month) === 12 ? parseInt(year) + 1 : parseInt(year);
-  const endDate = `${endYear}-${String(endMonth).padStart(2, '0')}-01`;
+  const monthPad = String(m).padStart(2, '0');
+  const monthStart = new Date(`${y}-${monthPad}-01T00:00:00+05:30`);
+  const endMonth = m === 12 ? 1 : m + 1;
+  const endYear = m === 12 ? y + 1 : y;
+  const monthEnd = new Date(`${endYear}-${String(endMonth).padStart(2, '0')}-01T00:00:00+05:30`);
 
   let q = supabase
     .from('visitors')
     .select('created_at')
-    .gte('created_at', `${startDate}T00:00:00.000Z`)
-    .lt('created_at', `${endDate}T00:00:00.000Z`);
+    .gte('created_at', monthStart.toISOString())
+    .lt('created_at', monthEnd.toISOString());
 
   if (building_id) q = q.eq('building_id', building_id);
 
@@ -230,6 +244,7 @@ exports.getVisitorDates = async (req, res) => {
   const { data, error } = await q;
   if (error) return res.status(400).json({ error: error.message });
 
-  const dates = [...new Set(data.map((v) => v.created_at.slice(0, 10)))];
+  // Bucket by IST calendar day (not UTC date prefix) so 1:00 AM IST stays on the correct day
+  const dates = [...new Set((data || []).map((v) => istDateString(v.created_at)))];
   res.json({ dates });
 };

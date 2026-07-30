@@ -7,10 +7,13 @@ const { createCopy } = require('../utils/notificationCopy');
 const VALID_LANGUAGES = ['english', 'hindi', 'gujarati'];
 const SIGNED_URL_TTL_SECONDS = 60 * 60; // 1 hour — long enough to read, short enough to limit leaks
 const TITLE_MAX = 150;
+/** High-quality newspaper PDFs are large; keep this newspaper-only. */
+const MAX_NEWSPAPER_PDF_BYTES = 100 * 1024 * 1024; // 100 MB
 
 // Multer — memory storage for Supabase upload
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_NEWSPAPER_PDF_BYTES } });
 exports.upload = upload;
+exports.MAX_NEWSPAPER_PDF_BYTES = MAX_NEWSPAPER_PDF_BYTES;
 
 const extractStoragePath = (fileUrl) => {
   if (!fileUrl) return null;
