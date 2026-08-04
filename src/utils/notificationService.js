@@ -1,6 +1,11 @@
 const supabase = require('../supabase');
 const { normalizeLang } = require('./notificationCopy');
 
+/** Expo allows max 6 concurrent connections; keep sends within that. */
+const EXPO_CHUNK_CONCURRENCY = 6;
+/** Keep PostgREST payloads bounded for large buildings. */
+const NOTIFICATION_INSERT_CHUNK = 500;
+
 let expoSdkPromise = null;
 
 async function getExpoSdk() {
@@ -55,50 +60,72 @@ function resolveMessage(payload, lang) {
   };
 }
 
-async function buildPushMessages(recipients, payload) {
-  const recipientsWithToken = dedupeRecipients(recipients).filter((r) => r?.expo_push_token);
-  if (!recipientsWithToken.length) return [];
+function buildPushMessagesSync(Expo, recipients, payload) {
+  const tokenSeen = new Set();
+  const messages = [];
+  for (const r of recipients) {
+    const token = r?.expo_push_token;
+    if (!token || !Expo.isExpoPushToken(token) || tokenSeen.has(token)) continue;
+    tokenSeen.add(token);
+    const { title, body, type, meta } = resolveMessage(payload, r.app_language);
+    messages.push({
+      to: token,
+      sound: 'default',
+      title,
+      body,
+      data: { type, ...meta },
+    });
+  }
+  return messages;
+}
 
-  try {
-    const { Expo } = await getExpoSdk();
-    const tokenSeen = new Set();
-    const messages = [];
-    for (const r of recipientsWithToken) {
-      const token = r.expo_push_token;
-      if (!Expo.isExpoPushToken(token) || tokenSeen.has(token)) continue;
-      tokenSeen.add(token);
-      const { title, body, type, meta } = resolveMessage(payload, r.app_language);
-      messages.push({
-        to: token,
-        sound: 'default',
-        title,
-        body,
-        data: { type, ...meta },
-      });
-    }
-    return messages;
-  } catch (error) {
-    console.error('Error validating Expo push tokens:', error);
-    return [];
+async function sendPushChunks(expo, chunks) {
+  for (let i = 0; i < chunks.length; i += EXPO_CHUNK_CONCURRENCY) {
+    const batch = chunks.slice(i, i + EXPO_CHUNK_CONCURRENCY);
+    await Promise.all(
+      batch.map(async (chunk) => {
+        try {
+          await expo.sendPushNotificationsAsync(chunk);
+        } catch (error) {
+          console.error('Error sending push notification chunk:', error);
+        }
+      }),
+    );
   }
 }
 
-async function sendPushNotifications(messages) {
-  const deduped = dedupePushMessages(messages);
-  if (!deduped.length) return;
+async function insertNotificationRows(rows) {
+  if (!rows.length) return;
+  for (let i = 0; i < rows.length; i += NOTIFICATION_INSERT_CHUNK) {
+    const slice = rows.slice(i, i + NOTIFICATION_INSERT_CHUNK);
+    const { error } = await supabase.from('notifications').insert(slice);
+    if (error) throw error;
+  }
+}
+
+/**
+ * Inbox insert + Expo push for recipients that already include
+ * { id, expo_push_token, app_language }. Skips an extra users query.
+ */
+async function deliverToRecipients(recipients, payload) {
+  const uniqueMembers = dedupeRecipients(recipients);
+  if (!uniqueMembers.length) return;
+
+  const rows = uniqueMembers.map((m) => {
+    const { title, body, type, meta } = resolveMessage(payload, m.app_language);
+    return { user_id: m.id, title, body, type, meta };
+  });
+
+  await insertNotificationRows(rows);
 
   try {
-    const { expo } = await getExpoSdk();
-    const chunks = expo.chunkPushNotifications(deduped);
-    for (const chunk of chunks) {
-      try {
-        await expo.sendPushNotificationsAsync(chunk);
-      } catch (error) {
-        console.error('Error sending push notification chunk:', error);
-      }
-    }
+    const { Expo, expo } = await getExpoSdk();
+    const messages = dedupePushMessages(buildPushMessagesSync(Expo, uniqueMembers, payload));
+    if (!messages.length) return;
+    const chunks = expo.chunkPushNotifications(messages);
+    await sendPushChunks(expo, chunks);
   } catch (error) {
-    console.error('Error initializing Expo SDK:', error);
+    console.error('Error sending push notifications:', error);
   }
 }
 
@@ -110,17 +137,19 @@ exports.notifyUser = async (user_id, payload) => {
     .eq('id', user_id)
     .single();
 
-  const { title, body, type, meta } = resolveMessage(payload, user?.app_language);
-
-  await supabase.from('notifications').insert({ user_id, title, body, type, meta });
-
-  if (user?.expo_push_token) {
-    const messages = await buildPushMessages([user], payload);
-    await sendPushNotifications(messages);
+  if (!user) {
+    const { title, body, type, meta } = resolveMessage(payload, null);
+    await supabase.from('notifications').insert({ user_id, title, body, type, meta });
+    return;
   }
+
+  await deliverToRecipients([user], payload);
 };
 
-/** Batch notify many users (one DB insert + chunked Expo push). Prefer over looping notifyUser. */
+/** Prefer when caller already loaded user rows (avoids a second users query). */
+exports.notifyRecipients = deliverToRecipients;
+
+/** Batch notify many users (one users query + chunked insert/push). Prefer over looping notifyUser. */
 exports.notifyUsersByIds = async (user_ids, payload) => {
   const ids = [...new Set((user_ids || []).filter(Boolean))];
   if (!ids.length) return;
@@ -130,18 +159,7 @@ exports.notifyUsersByIds = async (user_ids, payload) => {
     .select('id, expo_push_token, app_language')
     .in('id', ids);
 
-  const uniqueMembers = dedupeRecipients(members);
-  if (!uniqueMembers.length) return;
-
-  const rows = uniqueMembers.map((m) => {
-    const { title, body, type, meta } = resolveMessage(payload, m.app_language);
-    return { user_id: m.id, title, body, type, meta };
-  });
-
-  await supabase.from('notifications').insert(rows);
-
-  const messages = await buildPushMessages(uniqueMembers, payload);
-  await sendPushNotifications(messages);
+  await deliverToRecipients(members, payload);
 };
 
 // Notify members — each user gets title/body in their app_language
@@ -160,18 +178,7 @@ exports.notifyMembers = async (building_id, payload, specific_user_ids = null, e
   }
 
   const { data: members } = await query;
-  const uniqueMembers = dedupeRecipients(members);
-  if (!uniqueMembers.length) return;
-
-  const rows = uniqueMembers.map((m) => {
-    const { title, body, type, meta } = resolveMessage(payload, m.app_language);
-    return { user_id: m.id, title, body, type, meta };
-  });
-
-  await supabase.from('notifications').insert(rows);
-
-  const messages = await buildPushMessages(uniqueMembers, payload);
-  await sendPushNotifications(messages);
+  await deliverToRecipients(members, payload);
 };
 
 exports.notifyPramukh = async (building_id, payload) => {
@@ -182,18 +189,7 @@ exports.notifyPramukh = async (building_id, payload) => {
     .eq('role', 'pramukh')
     .eq('status', 'approved');
 
-  const uniquePramukhs = dedupeRecipients(pramukhs);
-  if (!uniquePramukhs.length) return;
-
-  const rows = uniquePramukhs.map((p) => {
-    const { title, body, type, meta } = resolveMessage(payload, p.app_language);
-    return { user_id: p.id, title, body, type, meta };
-  });
-
-  await supabase.from('notifications').insert(rows);
-
-  const messages = await buildPushMessages(uniquePramukhs, payload);
-  await sendPushNotifications(messages);
+  await deliverToRecipients(pramukhs, payload);
 };
 
 exports.notifyMembersExcept = async (building_id, exclude_user_id, payload) => {

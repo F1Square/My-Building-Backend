@@ -63,6 +63,9 @@ function createTableApi(table) {
       state.filters.push([col, val]);
       return api;
     },
+    or() {
+      return api;
+    },
     order(_col, opts = {}) {
       state.orderAsc = opts.ascending !== false;
       return api;
@@ -172,7 +175,13 @@ function loadController() {
     loaded: true,
     exports: {
       notifyUser: async (...args) => {
-        notifyCalls.push(args);
+        notifyCalls.push(['notifyUser', ...args]);
+      },
+      notifyUsersByIds: async (...args) => {
+        notifyCalls.push(['notifyUsersByIds', ...args]);
+      },
+      notifyRecipients: async (...args) => {
+        notifyCalls.push(['notifyRecipients', ...args]);
       },
     },
   };
@@ -228,7 +237,7 @@ describe('newspaper editions — multi PDF same date/language + scope isolation'
       res,
     );
     assert.equal(res.statusCode, 422);
-    assert.match(res.body.error, /file or a url/i);
+    assert.match(res.body.error, /file|storage_path|url/i);
   });
 
   it('admin can upload multiple titled PDFs for the SAME date and SAME language (insert, not replace)', async () => {

@@ -155,26 +155,28 @@ exports.createUploadUrl = async (req, res) => {
 };
 
 async function notifyNewspaperSubscribers({ date, language, edition_id, title }) {
-  const now = new Date();
-  const { data: subs } = await supabase
+  const nowIso = new Date().toISOString();
+  const { data: subs, error } = await supabase
     .from('subscriptions')
-    .select('user_id, expires_at, newspaper_expires_at')
+    .select('user_id, users!inner(id, expo_push_token, app_language)')
     .eq('newspaper_addon', true)
-    .eq('status', 'active');
+    .eq('status', 'active')
+    .or(`expires_at.is.null,expires_at.gt."${nowIso}"`)
+    .or(`newspaper_expires_at.is.null,newspaper_expires_at.gt."${nowIso}"`);
+
+  if (error) throw error;
 
   const recipients = [];
   const seen = new Set();
   for (const s of subs || []) {
-    if (!s.user_id || seen.has(s.user_id)) continue;
-    const planOk = !s.expires_at || new Date(s.expires_at) > now;
-    const newsOk = !s.newspaper_expires_at || new Date(s.newspaper_expires_at) > now;
-    if (!planOk || !newsOk) continue;
-    seen.add(s.user_id);
-    recipients.push(s.user_id);
+    const u = s.users;
+    if (!u?.id || seen.has(u.id)) continue;
+    seen.add(u.id);
+    recipients.push(u);
   }
 
   if (!recipients.length) return;
-  await ns.notifyUsersByIds(recipients, {
+  await ns.notifyRecipients(recipients, {
     type: 'newspaper',
     meta: { date, language, edition_id, title },
     build: (lang) => createCopy(lang).newspaperEdition(date, language, title),
