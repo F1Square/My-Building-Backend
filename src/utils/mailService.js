@@ -35,7 +35,7 @@ function escapeHtml(value) {
  * Send an email via the shared Gmail transport (MAIL_USER / MAIL_PASS).
  * Throws on SMTP failure so callers can decide whether to fail the request.
  */
-async function sendMail({ to, subject, html, text }) {
+async function sendMail({ to, subject, html, text, attachments }) {
   if (!process.env.MAIL_USER || !process.env.MAIL_PASS) {
     throw new Error('MAIL_USER / MAIL_PASS not configured');
   }
@@ -46,6 +46,7 @@ async function sendMail({ to, subject, html, text }) {
     subject,
     html,
     text,
+    ...(attachments?.length ? { attachments } : {}),
   });
 }
 

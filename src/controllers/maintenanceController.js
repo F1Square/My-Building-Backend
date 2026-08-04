@@ -9,6 +9,11 @@ const { logActivity } = require('../utils/activityLogger');
 const { computeMaintenancePayable } = require('../utils/maintenancePayable');
 const { withDisplayUser, userDisplayName, mapRowsWithDisplayUsers } = require('../utils/userDisplayName');
 const { normalizeBankWing, pickBankDetailsForWing } = require('../utils/validators');
+const {
+  buildReceiptPdfBuffer,
+  sendPaymentReceiptEmail,
+  RECEIPT_SELECT,
+} = require('../utils/maintenanceReceiptPdf');
 
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -89,10 +94,14 @@ exports.addBill = async (req, res) => {
           status: 'pending', category: 'maintenance',
         }))
       );
-      await ns.notifyMembers(building_id, {
-        type: 'bill', meta: { bill_id: bill.id },
-        build: (lang) => createCopy(lang).maintenanceBill(parsedAmount, billMonth, billYear, due_date, parsedPenalty),
-      });
+      try {
+        await ns.notifyMembers(building_id, {
+          type: 'bill', meta: { bill_id: bill.id, category: 'maintenance' },
+          build: (lang) => createCopy(lang).maintenanceBill(parsedAmount, billMonth, billYear, due_date, parsedPenalty),
+        });
+      } catch (notifyErr) {
+        console.error('[maintenance] bill notify failed:', notifyErr);
+      }
     }
     return res.status(201).json({ message: 'Bill added', bill });
   }
@@ -251,14 +260,17 @@ exports.addBill = async (req, res) => {
           }))
         );
         const payload = {
-          type: 'bill', meta: { bill_id: bill.id },
+          type: 'bill', meta: { bill_id: bill.id, category: 'special' },
           build: (lang) => createCopy(lang).specialBillUniform(description, parsedAmount, due_date),
         };
-        if (targeting_mode === 'targeted') {
-          // Rows already loaded with tokens — skip notifyMembers re-fetch
-          await ns.notifyRecipients(targetMembers, payload);
-        } else {
-          await ns.notifyMembers(building_id, payload);
+        try {
+          if (targeting_mode === 'targeted') {
+            await ns.notifyRecipients(targetMembers, payload);
+          } else {
+            await ns.notifyMembers(building_id, payload);
+          }
+        } catch (notifyErr) {
+          console.error('[special] uniform notify failed:', notifyErr);
         }
       }
       return res.status(201).json({ message: 'Special bill added', bill });
@@ -307,10 +319,12 @@ exports.addBill = async (req, res) => {
     await ns.notifyGroups([...byAmount.values()].map(({ amount, ids }) => ({
       ids,
       payload: {
-        type: 'bill', meta: { bill_id: bill.id },
+        type: 'bill', meta: { bill_id: bill.id, category: 'special' },
         build: (lang) => createCopy(lang).specialBillFlat(description, amount, due_date),
       },
-    })));
+    }))).catch((notifyErr) => {
+      console.error('[special] flat_wise notify failed:', notifyErr);
+    });
     return res.status(201).json({ message: 'Special bill added', bill });
   }
 
@@ -606,7 +620,7 @@ exports.approvePayment = async (req, res) => {
 
   const { data: record, error: fetchErr } = await supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(month, year, amount), users!maintenance_payments_user_id_fkey(name, role)')
+    .select('*, maintenance_bills(month, year, amount), users!maintenance_payments_user_id_fkey(name, role, email)')
     .eq('id', id)
     .single();
 
@@ -640,14 +654,19 @@ exports.approvePayment = async (req, res) => {
     console.error('[approvePayment] expense ledger failed:', e?.message);
   }
 
-  // Notify the resident their manual payment was approved
-  try {
-    await ns.notifyUser(record.user_id, {
-      type: 'payment_approved',
-      meta: { payment_record_id: id },
-      build: (lang) => createCopy(lang).paymentApproved(method, record.total_amount || record.amount),
-    });
-  } catch {}
+  // Notify resident + email PDF receipt (best-effort; do not block response)
+  void (async () => {
+    try {
+      await ns.notifyUser(record.user_id, {
+        type: 'payment_approved',
+        meta: { payment_record_id: id },
+        build: (lang) => createCopy(lang).paymentApproved(method, record.total_amount || record.amount),
+      });
+    } catch (e) {
+      console.error('[approvePayment] notify failed:', e?.message);
+    }
+    await sendPaymentReceiptEmail(id);
+  })();
 
   res.json({ message: 'Payment approved', status: 'paid' });
 };
@@ -864,6 +883,17 @@ exports.easebuzzCallback = async (req, res) => {
                   method: 'online_easebuzz',
                 }
               ));
+              tasks.push(
+                ns.notifyUser(rec.user_id, {
+                  type: 'payment_approved',
+                  meta: { payment_record_id: record_id },
+                  build: (lang) => createCopy(lang).paymentApproved(
+                    'Online',
+                    rec.total_amount || rec.amount,
+                  ),
+                }).catch((e) => console.error('[easebuzzCallback] notify failed:', e?.message))
+              );
+              tasks.push(sendPaymentReceiptEmail(record_id));
             }
             await Promise.allSettled(tasks);
           } catch (e) {
@@ -905,7 +935,7 @@ exports.downloadReceipt = async (req, res) => {
 
   const { data: record } = await supabase
     .from('maintenance_payments')
-    .select('*, maintenance_bills(month, year, amount, due_date, description, category, penalty_amount), users!maintenance_payments_user_id_fkey(name, flat_no, email, phone), buildings(name, address)')
+    .select(RECEIPT_SELECT)
     .eq('id', payment_record_id).single();
 
   if (!record) return res.status(404).json({ error: 'Record not found' });
@@ -914,110 +944,15 @@ exports.downloadReceipt = async (req, res) => {
   if (req.user.role === 'user' && record.user_id !== req.user.id)
     return res.status(403).json({ error: 'Access denied' });
 
-  const bill = record.maintenance_bills;
-  const user = withDisplayUser(record.users);
-  const building = record.buildings;
-
-  // Resolve amounts. Use the per-record numbers (penalty_amount, total_amount)
-  // captured at payment time so the PDF reflects what the resident actually
-  // paid, not the current bill row (which may be edited later).
-  const baseAmount = Number(record.amount ?? bill?.amount ?? 0);
-  const penaltyAmount = Number(record.penalty_amount ?? 0);
-  const totalAmount = Number(record.total_amount ?? (baseAmount + penaltyAmount));
-
-  // Friendly payment-method label.
-  const rawMethod = String(record.payment_method || '').toLowerCase();
-  const methodLabel = rawMethod.startsWith('online') || rawMethod === 'easebuzz'
-    ? 'Online (Easebuzz)'
-    : rawMethod === 'cheque'
-      ? 'Cheque'
-      : rawMethod === 'cash'
-        ? 'Cash'
-        : 'Manual';
-
-  // Friendly category label for the title strip.
-  const categoryLabel = {
-    maintenance: 'Maintenance Payment Receipt',
-    water_meter: 'Water Meter Payment Receipt',
-    special: 'Special Bill Payment Receipt',
-  }[bill?.category || 'maintenance'] || 'Payment Receipt';
-
-  const doc = new PDFDocument({ margin: 50, size: 'A4' });
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename=receipt_${payment_record_id.slice(0, 8)}.pdf`);
-  doc.pipe(res);
-
-  // Header band
-  doc.rect(0, 0, doc.page.width, 80).fill('#1E3A8A');
-  doc.fillColor('#fff').fontSize(26).font('Helvetica-Bold').text('My Building', 50, 22);
-  doc.fontSize(11).font('Helvetica').text(categoryLabel, 50, 52);
-
-  // Receipt meta box
-  doc.fillColor('#111827').rect(50, 100, doc.page.width - 100, 55).stroke('#E5E7EB');
-  doc.fontSize(10).font('Helvetica');
-  doc.text(`Receipt No: ${payment_record_id.slice(0, 8).toUpperCase()}`, 62, 112);
-  doc.text(`Payment Date: ${record.paid_at ? new Date(record.paid_at).toLocaleDateString('en-IN') : '—'}`, 62, 126);
-  doc.text(`Method: ${methodLabel}`, 300, 112);
-  if (record.razorpay_payment_id) {
-    doc.text(`Reference: ${record.razorpay_payment_id}`, 300, 126);
+  try {
+    const pdf = await buildReceiptPdfBuffer(record);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=receipt_${payment_record_id.slice(0, 8)}.pdf`);
+    res.send(pdf);
+  } catch (err) {
+    console.error('[downloadReceipt] pdf failed:', err?.message || err);
+    res.status(500).json({ error: 'Failed to generate receipt' });
   }
-  doc.fillColor('#16A34A').font('Helvetica-Bold').text('STATUS: PAID', 62, 140);
-
-  // Two-column info
-  doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Building', 50, 175);
-  doc.font('Helvetica').fontSize(10).fillColor('#374151');
-  doc.text(building?.name || 'N/A', 50, 191);
-  doc.text(building?.address || '', 50, 205);
-
-  doc.fillColor('#111827').font('Helvetica-Bold').fontSize(12).text('Resident', 300, 175);
-  doc.font('Helvetica').fontSize(10).fillColor('#374151');
-  doc.text(`Name: ${userDisplayName(user)}`, 300, 191);
-  doc.text(`Flat: ${user?.flat_no || 'N/A'}  |  Phone: ${user?.phone || 'N/A'}`, 300, 205);
-
-  // Table header
-  doc.rect(50, 235, doc.page.width - 100, 26).fill('#F3F4F6');
-  doc.fillColor('#111827').font('Helvetica-Bold').fontSize(11);
-  doc.text('Description', 62, 243);
-  doc.text('Period', 240, 243);
-  doc.text('Due Date', 360, 243);
-  doc.text('Amount', 470, 243);
-
-  // Base bill line item
-  let rowY = 261;
-  doc.rect(50, rowY, doc.page.width - 100, 28).stroke('#E5E7EB');
-  doc.font('Helvetica').fontSize(10).fillColor('#374151');
-  doc.text(bill?.description || 'Bill', 62, rowY + 9);
-  doc.text(bill?.month ? `${MONTHS[bill.month]} ${bill.year}` : '—', 240, rowY + 9);
-  doc.text(bill?.due_date || '—', 360, rowY + 9);
-  doc.text(`Rs. ${baseAmount.toLocaleString('en-IN')}`, 470, rowY + 9);
-  rowY += 28;
-
-  // Penalty line item (only when actually charged on this payment)
-  if (penaltyAmount > 0) {
-    doc.rect(50, rowY, doc.page.width - 100, 28).stroke('#E5E7EB');
-    doc.fillColor('#B45309').font('Helvetica-Oblique');
-    doc.text('Late-payment penalty', 62, rowY + 9);
-    doc.fillColor('#374151').font('Helvetica');
-    doc.text('—', 240, rowY + 9);
-    doc.text('—', 360, rowY + 9);
-    doc.fillColor('#B45309').font('Helvetica-Bold');
-    doc.text(`Rs. ${penaltyAmount.toLocaleString('en-IN')}`, 470, rowY + 9);
-    rowY += 28;
-  }
-
-  // Total row (uses the actual paid total, including penalty when present)
-  rowY += 12;
-  doc.rect(50, rowY, doc.page.width - 100, 36).fill('#1E3A8A');
-  doc.fillColor('#fff').font('Helvetica-Bold').fontSize(13);
-  doc.text('Total Paid', 62, rowY + 11);
-  doc.text(`Rs. ${totalAmount.toLocaleString('en-IN')}`, 470, rowY + 11);
-
-  // Footer
-  doc.fillColor('#9CA3AF').font('Helvetica').fontSize(9);
-  doc.text('This is a computer-generated receipt. No signature required.', 50, rowY + 70, { align: 'center', width: doc.page.width - 100 });
-  doc.text(`Generated on ${new Date().toLocaleString('en-IN')}`, 50, rowY + 83, { align: 'center', width: doc.page.width - 100 });
-
-  doc.end();
 };
 
 // Pramukh/Admin: generate PDF or Excel report for a bill
