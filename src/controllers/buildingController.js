@@ -479,7 +479,7 @@ exports.adminPromoteToPramukh = async (req, res) => {
 
   const { data: user, error: fetchErr } = await supabase
     .from('users')
-    .select('id, role, building_id, name, email')
+    .select('id, role, building_id, name, email, expo_push_token, app_language')
     .eq('id', user_id)
     .single();
   if (fetchErr || !user) return res.status(404).json({ error: 'User not found' });
@@ -495,7 +495,7 @@ exports.adminPromoteToPramukh = async (req, res) => {
 
   // Best-effort notification — don't fail the request if it errors.
   try {
-    await ns.notifyUser(user_id, {
+    await ns.notifyRecipients([user], {
       type: 'role_change',
       meta: { role: 'pramukh' },
       build: (lang) => createCopy(lang).promotedPramukh(),
@@ -512,7 +512,7 @@ exports.adminDemoteToUser = async (req, res) => {
 
   const { data: user, error: fetchErr } = await supabase
     .from('users')
-    .select('id, role')
+    .select('id, role, expo_push_token, app_language')
     .eq('id', user_id)
     .single();
   if (fetchErr || !user) return res.status(404).json({ error: 'User not found' });
@@ -525,7 +525,7 @@ exports.adminDemoteToUser = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   try {
-    await ns.notifyUser(user_id, {
+    await ns.notifyRecipients([user], {
       type: 'role_change',
       meta: { role: 'user' },
       build: (lang) => createCopy(lang).demotedToUser(),

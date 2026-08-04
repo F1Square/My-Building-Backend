@@ -162,6 +162,20 @@ exports.notifyUsersByIds = async (user_ids, payload) => {
   await deliverToRecipients(members, payload);
 };
 
+/**
+ * Parallel batch notify when payload differs by group.
+ * Each item: { ids?: string[], recipients?: object[], payload }
+ * Prefer recipients (0 extra users queries) when rows are already loaded.
+ */
+exports.notifyGroups = async (groups) => {
+  const tasks = [];
+  for (const g of groups || []) {
+    if (g?.recipients?.length) tasks.push(deliverToRecipients(g.recipients, g.payload));
+    else if (g?.ids?.length) tasks.push(exports.notifyUsersByIds(g.ids, g.payload));
+  }
+  if (tasks.length) await Promise.all(tasks);
+};
+
 // Notify members — each user gets title/body in their app_language
 exports.notifyMembers = async (building_id, payload, specific_user_ids = null, exclude_user_id = null) => {
   let query = supabase

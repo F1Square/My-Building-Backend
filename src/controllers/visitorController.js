@@ -40,10 +40,10 @@ async function visitorFlatLabelsForUser(user) {
   return buildVisitorFlatLabels(flat, wing);
 }
 
-async function loadBuildingPramukhIds(building_id) {
+async function loadBuildingPramukhs(building_id) {
   const { data } = await supabase
     .from('users')
-    .select('id')
+    .select('id, expo_push_token, app_language')
     .eq('building_id', building_id)
     .eq('role', 'pramukh')
     .eq('status', 'approved');
@@ -79,19 +79,14 @@ async function notifyWatchmanVisitor(building_id, visitorId, name, flat_no, purp
     if (!resolved.error) residents = resolved.residents || [];
   }
 
-  const pramukhs = await loadBuildingPramukhIds(building_id);
-  const recipientIds = visitorNotifyRecipientIds(residents, pramukhs);
-  if (!recipientIds.length) return;
+  const pramukhs = await loadBuildingPramukhs(building_id);
+  if (!visitorNotifyRecipientIds(residents, pramukhs).length) return;
 
-  await ns.notifyMembers(
-    building_id,
-    {
-      type: 'visitor',
-      meta: { visitor_id: visitorId, flat_no: label },
-      build: (lang) => createCopy(lang).visitorWatchman(name, flat_no, purpose),
-    },
-    recipientIds,
-  );
+  await ns.notifyRecipients([...residents, ...pramukhs], {
+    type: 'visitor',
+    meta: { visitor_id: visitorId, flat_no: label },
+    build: (lang) => createCopy(lang).visitorWatchman(name, flat_no, purpose),
+  });
 }
 
 // Upload visitor photo to Cloudinary

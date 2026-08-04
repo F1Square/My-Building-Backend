@@ -11,10 +11,12 @@ const {
 const VALID_STATUS = ['open', 'in_progress', 'resolved', 'closed'];
 
 async function notifyAdmins(payload) {
-  const { data: admins } = await supabase.from('users').select('id').eq('role', 'admin');
-  for (const admin of admins || []) {
-    await ns.notifyUser(admin.id, { type: 'support', ...payload });
-  }
+  const { data: admins } = await supabase
+    .from('users')
+    .select('id, expo_push_token, app_language')
+    .eq('role', 'admin');
+  if (!admins?.length) return;
+  await ns.notifyRecipients(admins, { type: 'support', ...payload });
 }
 
 async function getTicketForUser(ticketId, user) {

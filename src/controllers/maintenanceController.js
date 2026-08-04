@@ -177,18 +177,28 @@ exports.addBill = async (req, res) => {
       if (!amountByUser.has(entry.user_id)) amountByUser.set(entry.user_id, parseFloat(entry.amount));
     }
     const { data: allMembers } = await supabase
-      .from('users').select('id').eq('building_id', building_id).eq('status', 'approved');
+      .from('users')
+      .select('id, expo_push_token, app_language')
+      .eq('building_id', building_id)
+      .eq('status', 'approved');
     try {
-      await Promise.all((allMembers || []).map((m) => {
+      const byPayload = new Map();
+      for (const m of allMembers || []) {
         const amt = amountByUser.get(m.id);
-        return ns.notifyUser(m.id, {
+        const key = amt != null ? `billed:${amt}` : 'unbilled';
+        if (!byPayload.has(key)) byPayload.set(key, { amount: amt, recipients: [] });
+        byPayload.get(key).recipients.push(m);
+      }
+      await ns.notifyGroups([...byPayload.values()].map(({ amount, recipients }) => ({
+        recipients,
+        payload: {
           type: 'bill',
           meta: { bill_id: bill.id, category: 'water_meter' },
-          build: (lang) => (amt != null
-            ? createCopy(lang).waterBillFlat(amt, due_date)
+          build: (lang) => (amount != null
+            ? createCopy(lang).waterBillFlat(amount, due_date)
             : createCopy(lang).waterBillUniform(totalSum, due_date)),
-        });
-      }));
+        },
+      })));
     } catch (notifyErr) {
       console.error('[water_meter] flat_wise notify failed:', notifyErr);
     }
@@ -205,7 +215,11 @@ exports.addBill = async (req, res) => {
       if (!targeted_user_ids || !Array.isArray(targeted_user_ids) || targeted_user_ids.length === 0)
         return res.status(422).json({ error: 'At least one flat must be selected' });
       const { data } = await supabase
-        .from('users').select('id').in('id', targeted_user_ids).eq('building_id', building_id).eq('status', 'approved');
+        .from('users')
+        .select('id, expo_push_token, app_language')
+        .in('id', targeted_user_ids)
+        .eq('building_id', building_id)
+        .eq('status', 'approved');
       targetMembers = data || [];
     } else {
       const { data } = await supabase
@@ -236,10 +250,16 @@ exports.addBill = async (req, res) => {
             status: 'pending', category: 'special',
           }))
         );
-        await ns.notifyMembers(building_id, {
+        const payload = {
           type: 'bill', meta: { bill_id: bill.id },
           build: (lang) => createCopy(lang).specialBillUniform(description, parsedAmount, due_date),
-        }, targeting_mode === 'targeted' ? targetMembers.map(m => m.id) : null);
+        };
+        if (targeting_mode === 'targeted') {
+          // Rows already loaded with tokens — skip notifyMembers re-fetch
+          await ns.notifyRecipients(targetMembers, payload);
+        } else {
+          await ns.notifyMembers(building_id, payload);
+        }
       }
       return res.status(201).json({ message: 'Special bill added', bill });
     }
@@ -274,15 +294,23 @@ exports.addBill = async (req, res) => {
         status: 'pending', category: 'special',
       }))
     );
-    const notifiedUsers = new Set();
+    const amountByUser = new Map();
     for (const entry of flat_amounts) {
-      if (notifiedUsers.has(entry.user_id)) continue;
-      notifiedUsers.add(entry.user_id);
-      await ns.notifyUser(entry.user_id, {
-        type: 'bill', meta: { bill_id: bill.id },
-        build: (lang) => createCopy(lang).specialBillFlat(description, entry.amount, due_date),
-      });
+      if (!amountByUser.has(entry.user_id)) amountByUser.set(entry.user_id, parseFloat(entry.amount));
     }
+    const byAmount = new Map();
+    for (const [userId, amt] of amountByUser) {
+      const key = String(amt);
+      if (!byAmount.has(key)) byAmount.set(key, { amount: amt, ids: [] });
+      byAmount.get(key).ids.push(userId);
+    }
+    await ns.notifyGroups([...byAmount.values()].map(({ amount, ids }) => ({
+      ids,
+      payload: {
+        type: 'bill', meta: { bill_id: bill.id },
+        build: (lang) => createCopy(lang).specialBillFlat(description, amount, due_date),
+      },
+    })));
     return res.status(201).json({ message: 'Special bill added', bill });
   }
 
@@ -659,7 +687,7 @@ exports.requestCashPayment = async (req, res) => {
   try {
     const { data: approvers } = await supabase
       .from('users')
-      .select('id')
+      .select('id, expo_push_token, app_language')
       .eq('building_id', record.building_id)
       .in('role', ['pramukh', 'admin'])
       .eq('status', 'approved');
@@ -669,11 +697,11 @@ exports.requestCashPayment = async (req, res) => {
     const amount = record.total_amount || record.amount;
 
     if (approvers?.length) {
-      await Promise.all(approvers.map((a) => ns.notifyUser(a.id, {
+      await ns.notifyRecipients(approvers, {
         type: 'cash_requested',
         meta: { payment_record_id: id },
         build: (lang) => createCopy(lang).cashPaymentRequested(amount, period),
-      })));
+      });
     }
   } catch {}
 
@@ -1135,7 +1163,7 @@ exports.sendReminder = async (req, res) => {
 
   let query = supabase
     .from('maintenance_payments')
-    .select('id, user_id, building_id, maintenance_bills(month, year, amount)')
+    .select('id, user_id, building_id, bill_id, maintenance_bills(month, year, amount)')
     .eq('status', 'pending');
 
   if (building_id) query = query.eq('building_id', building_id);
@@ -1152,14 +1180,32 @@ exports.sendReminder = async (req, res) => {
   }
   const uniquePending = [...byUser.values()];
 
-  await Promise.all(uniquePending.map((p) => ns.notifyUser(p.user_id, {
-    type: 'reminder',
-    meta: { payment_record_id: p.id },
-    build: (lang) => createCopy(lang).paymentReminderManual(
-      p.maintenance_bills?.amount,
-      p.maintenance_bills?.month,
-      p.maintenance_bills?.year,
-    ),
+  // Group identical reminder copy (app opens /maintenance by type; bill_id is enough meta)
+  const groups = new Map();
+  for (const p of uniquePending) {
+    const amt = p.maintenance_bills?.amount;
+    const month = p.maintenance_bills?.month;
+    const year = p.maintenance_bills?.year;
+    const key = `${p.bill_id}|${amt}|${month}|${year}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        bill_id: p.bill_id,
+        amount: amt,
+        month,
+        year,
+        ids: [],
+      });
+    }
+    groups.get(key).ids.push(p.user_id);
+  }
+
+  await ns.notifyGroups([...groups.values()].map(({ bill_id: bid, amount, month, year, ids }) => ({
+    ids,
+    payload: {
+      type: 'reminder',
+      meta: { bill_id: bid },
+      build: (lang) => createCopy(lang).paymentReminderManual(amount, month, year),
+    },
   })));
 
   res.json({ message: `Reminder sent to ${uniquePending.length} member(s)` });

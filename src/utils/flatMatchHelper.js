@@ -112,7 +112,7 @@ async function resolveVisitorFlat(supabase, building_id, building, wing, flatNo)
 
   const { data, error } = await supabase
     .from('users')
-    .select('id, name, flat_no, wing, expo_push_token')
+    .select('id, name, flat_no, wing, expo_push_token, app_language')
     .eq('building_id', building_id)
     .eq('status', 'approved')
     .in('role', ['user', 'pramukh'])

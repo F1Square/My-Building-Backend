@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const supabase = require('../supabase');
-const { notifyUser } = require('./notificationService');
+const { notifyGroups } = require('./notificationService');
 const { createCopy } = require('./notificationCopy');
 
 // Activity logs older than this are purged daily to keep the table small
@@ -41,12 +41,11 @@ function startScheduler() {
   cron.schedule('0 10 * * *', async () => {
     try {
       console.log('[Scheduler] Checking for upcoming bill due dates...');
-      
+
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
       const tomorrowStr = tomorrow.toISOString().split('T')[0];
 
-      // Find all bills due tomorrow
       const { data: bills, error: billsError } = await supabase
         .from('maintenance_bills')
         .select('id, description, category, due_date')
@@ -57,27 +56,46 @@ function startScheduler() {
 
       console.log(`[Scheduler] Found ${bills.length} bills due tomorrow. Sending reminders...`);
 
-      for (const bill of bills) {
-        // Find all pending payments for this bill
-        const { data: payments, error: paymentsError } = await supabase
-          .from('maintenance_payments')
-          .select('user_id, amount')
-          .eq('bill_id', bill.id)
-          .eq('status', 'pending');
+      const billById = new Map(bills.map((b) => [b.id, b]));
+      const billIds = bills.map((b) => b.id);
 
-        if (paymentsError) {
-          console.error(`[Scheduler] Error fetching payments for bill ${bill.id}:`, paymentsError);
-          continue;
-        }
+      const { data: payments, error: paymentsError } = await supabase
+        .from('maintenance_payments')
+        .select('user_id, amount, bill_id')
+        .in('bill_id', billIds)
+        .eq('status', 'pending');
 
-        for (const p of payments) {
-          await notifyUser(p.user_id, {
-            type: 'reminder',
-            meta: { bill_id: bill.id },
-            build: (lang) => createCopy(lang).paymentReminderScheduled(bill.description, p.amount),
+      if (paymentsError) throw paymentsError;
+      if (!payments?.length) return;
+
+      // Group by bill + amount so copy stays correct while batching SQL/push
+      const groups = new Map();
+      for (const p of payments) {
+        if (!p.user_id || !billById.has(p.bill_id)) continue;
+        const key = `${p.bill_id}|${p.amount}`;
+        if (!groups.has(key)) {
+          groups.set(key, {
+            bill_id: p.bill_id,
+            amount: p.amount,
+            ids: [],
           });
         }
+        groups.get(key).ids.push(p.user_id);
       }
+
+      await notifyGroups(
+        [...groups.values()].map(({ bill_id, amount, ids }) => {
+          const bill = billById.get(bill_id);
+          return {
+            ids,
+            payload: {
+              type: 'reminder',
+              meta: { bill_id },
+              build: (lang) => createCopy(lang).paymentReminderScheduled(bill.description, amount),
+            },
+          };
+        }),
+      );
     } catch (err) {
       console.error('[Scheduler] Error in bill reminder job:', err);
     }

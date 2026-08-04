@@ -25,24 +25,21 @@ async function resolveVisitorPhotoUrl(photo_url) {
 async function notifyVisitorEntry(building_id, visitorId, name, flat_no, purpose, flatResidents) {
   const { data: pramukhs } = await supabase
     .from('users')
-    .select('id')
+    .select('id, expo_push_token, app_language')
     .eq('building_id', building_id)
     .eq('role', 'pramukh')
     .eq('status', 'approved');
 
-  const recipientIds = visitorNotifyRecipientIds(flatResidents, pramukhs);
-  if (!recipientIds.length) return;
+  // Residents already loaded by resolveVisitorFlat — merge with pramukhs, skip notifyMembers re-fetch
+  const recipients = [...(flatResidents || []), ...(pramukhs || [])];
+  if (!visitorNotifyRecipientIds(flatResidents, pramukhs).length) return;
 
   const purposeText = purpose?.trim() || null;
-  await ns.notifyMembers(
-    building_id,
-    {
-      type: 'visitor',
-      meta: { visitor_id: visitorId, flat_no },
-      build: (lang) => createCopy(lang).visitorAtDoor(name, flat_no, purposeText),
-    },
-    recipientIds,
-  );
+  await ns.notifyRecipients(recipients, {
+    type: 'visitor',
+    meta: { visitor_id: visitorId, flat_no },
+    build: (lang) => createCopy(lang).visitorAtDoor(name, flat_no, purposeText),
+  });
 }
 
 // PUBLIC: visitor self-entry via QR (no auth required)
