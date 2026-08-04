@@ -1,4 +1,5 @@
 const supabase = require('../supabase');
+const { notifyOpsWebsiteContact } = require('../utils/mailService');
 
 // PUBLIC: website visitor submits contact form
 exports.submitContact = async (req, res) => {
@@ -24,6 +25,8 @@ exports.submitContact = async (req, res) => {
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
+  await notifyOpsWebsiteContact(data);
+
   res.status(201).json({ message: 'Message received. We will get back to you soon!', contact: data });
 };
 

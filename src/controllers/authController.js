@@ -1,10 +1,10 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const supabase = require('../supabase');
 const { logActivity } = require('../utils/activityLogger');
 const { userDisplayName, withDisplayUser } = require('../utils/userDisplayName');
+const { sendMail } = require('../utils/mailService');
 
 // Helper: fetch active subscription for a user
 const getSubscription = async (user_id) => {
@@ -281,11 +281,6 @@ exports.login = async (req, res) => {
 
 // ── Forgot Password Flow ──────────────────────────────────────────────────────
 
-const getMailer = () => nodemailer.createTransport({
-  service: 'gmail',
-  auth: { user: process.env.MAIL_USER, pass: process.env.MAIL_PASS },
-});
-
 // Step 1: Send OTP to email
 exports.forgotPassword = async (req, res) => {
   const { email } = req.body;
@@ -358,9 +353,7 @@ exports.forgotPassword = async (req, res) => {
 
   // Send email
   try {
-    const mailer = getMailer();
-    await mailer.sendMail({
-      from: `"My Building App" <${process.env.MAIL_USER}>`,
+    await sendMail({
       to: normalizedEmail,
       subject: 'Password Reset OTP — My Building',
       html: `

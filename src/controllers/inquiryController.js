@@ -9,6 +9,7 @@ const {
   normalizePaymentMethods,
   validateSocietyInquiryFields,
 } = require('../utils/societyInquiryValidation');
+const { notifyOpsSocietyInquiry } = require('../utils/mailService');
 
 function buildInquiryRow({
   user_id,
@@ -133,6 +134,9 @@ exports.submitInquiry = async (req, res) => {
     }
   }
 
+  // Best-effort ops email — do not fail the inquiry if mail fails
+  await notifyOpsSocietyInquiry(data, 'App (register building)');
+
   res.status(201).json({ message: 'Inquiry submitted', inquiry: data });
 };
 
@@ -193,6 +197,9 @@ exports.submitPublicInquiry = async (req, res) => {
       return res.status(400).json({ error: err.message });
     }
   }
+
+  // Best-effort ops email — do not fail the inquiry if mail fails
+  await notifyOpsSocietyInquiry(data, 'Website (register society)');
 
   res.status(201).json({ message: 'Society registration submitted! We will contact you soon.', inquiry: data });
 };
