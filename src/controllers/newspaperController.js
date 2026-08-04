@@ -7,10 +7,11 @@ const { createCopy } = require('../utils/notificationCopy');
 const VALID_LANGUAGES = ['english', 'hindi', 'gujarati'];
 const SIGNED_URL_TTL_SECONDS = 60 * 60; // 1 hour — long enough to read, short enough to limit leaks
 const TITLE_MAX = 150;
-/** High-quality newspaper PDFs are large; keep this newspaper-only. */
-const MAX_NEWSPAPER_PDF_BYTES = 100 * 1024 * 1024; // 100 MB
+/** Align with Supabase Free global file limit + app client check. */
+const MAX_NEWSPAPER_PDF_BYTES = 50 * 1024 * 1024; // 50 MB
+const STORAGE_PATH_RE = /^newspapers\/(english|hindi|gujarati)\/[A-Za-z0-9._-]+\.pdf$/i;
 
-// Multer — memory storage for Supabase upload
+// Multer — memory storage fallback (small files / legacy). Large PDFs use signed direct upload.
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_NEWSPAPER_PDF_BYTES } });
 exports.upload = upload;
 exports.MAX_NEWSPAPER_PDF_BYTES = MAX_NEWSPAPER_PDF_BYTES;
@@ -133,9 +134,56 @@ exports.getAvailableDates = async (req, res) => {
   res.json(data || []);
 };
 
-// POST /newspapers — admin upload (always inserts; multiple PDFs per date+language allowed)
+/** Admin: signed URL so the app uploads PDF directly to Supabase (bypasses Vercel body limits). */
+exports.createUploadUrl = async (req, res) => {
+  const { date, language } = req.body;
+  if (!date || !language) return res.status(422).json({ error: 'date and language are required' });
+  if (!VALID_LANGUAGES.includes(language)) return res.status(422).json({ error: 'Invalid language' });
+
+  const path = `newspapers/${language}/${date}_${uuidv4()}.pdf`;
+  const { data, error } = await supabase.storage
+    .from('newspapers')
+    .createSignedUploadUrl(path);
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json({
+    signedUrl: data.signedUrl,
+    path: data.path || path,
+    token: data.token || null,
+    maxBytes: MAX_NEWSPAPER_PDF_BYTES,
+  });
+};
+
+async function notifyNewspaperSubscribers({ date, language, edition_id, title }) {
+  const now = new Date();
+  const { data: subs } = await supabase
+    .from('subscriptions')
+    .select('user_id, expires_at, newspaper_expires_at')
+    .eq('newspaper_addon', true)
+    .eq('status', 'active');
+
+  const recipients = [];
+  const seen = new Set();
+  for (const s of subs || []) {
+    if (!s.user_id || seen.has(s.user_id)) continue;
+    const planOk = !s.expires_at || new Date(s.expires_at) > now;
+    const newsOk = !s.newspaper_expires_at || new Date(s.newspaper_expires_at) > now;
+    if (!planOk || !newsOk) continue;
+    seen.add(s.user_id);
+    recipients.push(s.user_id);
+  }
+
+  if (!recipients.length) return;
+  await ns.notifyUsersByIds(recipients, {
+    type: 'newspaper',
+    meta: { date, language, edition_id, title },
+    build: (lang) => createCopy(lang).newspaperEdition(date, language, title),
+  });
+}
+
+// POST /newspapers — admin register edition (storage_path from direct upload, or legacy file/url)
 exports.uploadEdition = async (req, res) => {
-  const { date, language, url } = req.body;
+  const { date, language, url, storage_path } = req.body;
   const title = String(req.body.title || '').trim();
   if (!date || !language) return res.status(422).json({ error: 'date and language are required' });
   if (!VALID_LANGUAGES.includes(language)) return res.status(422).json({ error: 'Invalid language' });
@@ -145,8 +193,25 @@ exports.uploadEdition = async (req, res) => {
   let file_url = url?.trim() || null;
   let source = 'url';
 
-  if (req.file) {
-    // Unique name so multiple PDFs on the same date+language never overwrite each other
+  if (storage_path) {
+    const path = String(storage_path).trim();
+    if (!STORAGE_PATH_RE.test(path)) {
+      return res.status(422).json({ error: 'Invalid storage_path' });
+    }
+    // Confirm object exists before inserting the edition row (light check — no download)
+    const { data: probe, error: probeErr } = await supabase.storage
+      .from('newspapers')
+      .createSignedUrl(path, 60);
+    if (probeErr || !probe?.signedUrl) {
+      return res.status(400).json({
+        error: probeErr?.message || 'Uploaded PDF not found in storage. Please try again.',
+      });
+    }
+    const { data: publicUrl } = supabase.storage.from('newspapers').getPublicUrl(path);
+    file_url = publicUrl.publicUrl;
+    source = 'upload';
+  } else if (req.file) {
+    // Legacy / small-file path through API (avoid for large PDFs)
     const fileName = `newspapers/${language}/${date}_${uuidv4()}.pdf`;
     const { error: storageErr } = await supabase.storage
       .from('newspapers')
@@ -159,7 +224,7 @@ exports.uploadEdition = async (req, res) => {
     source = 'upload';
   }
 
-  if (!file_url) return res.status(422).json({ error: 'Either a file or a URL is required' });
+  if (!file_url) return res.status(422).json({ error: 'Either a file, storage_path, or a URL is required' });
 
   const { data: row, error } = await supabase
     .from('newspaper_editions')
@@ -170,31 +235,12 @@ exports.uploadEdition = async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   try {
-    const now = new Date();
-    const { data: subs } = await supabase
-      .from('subscriptions')
-      .select('user_id, expires_at, newspaper_expires_at')
-      .eq('newspaper_addon', true)
-      .eq('status', 'active');
-
-    const recipients = [];
-    const seen = new Set();
-    for (const s of subs || []) {
-      if (!s.user_id || seen.has(s.user_id)) continue;
-      const planOk = !s.expires_at || new Date(s.expires_at) > now;
-      const newsOk = !s.newspaper_expires_at || new Date(s.newspaper_expires_at) > now;
-      if (!planOk || !newsOk) continue;
-      seen.add(s.user_id);
-      recipients.push(s.user_id);
-    }
-
-    if (recipients.length) {
-      await Promise.all(recipients.map((user_id) => ns.notifyUser(user_id, {
-        type: 'newspaper',
-        meta: { date, language, edition_id: row.id, title },
-        build: (lang) => createCopy(lang).newspaperEdition(date, language, title),
-      })));
-    }
+    await notifyNewspaperSubscribers({
+      date,
+      language,
+      edition_id: row.id,
+      title,
+    });
   } catch (notifyErr) {
     console.error('[newspaper] notify subscribers failed:', notifyErr);
   }

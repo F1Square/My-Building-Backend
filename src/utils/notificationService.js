@@ -106,7 +106,7 @@ async function sendPushNotifications(messages) {
 exports.notifyUser = async (user_id, payload) => {
   const { data: user } = await supabase
     .from('users')
-    .select('expo_push_token, app_language')
+    .select('id, expo_push_token, app_language')
     .eq('id', user_id)
     .single();
 
@@ -118,6 +118,30 @@ exports.notifyUser = async (user_id, payload) => {
     const messages = await buildPushMessages([user], payload);
     await sendPushNotifications(messages);
   }
+};
+
+/** Batch notify many users (one DB insert + chunked Expo push). Prefer over looping notifyUser. */
+exports.notifyUsersByIds = async (user_ids, payload) => {
+  const ids = [...new Set((user_ids || []).filter(Boolean))];
+  if (!ids.length) return;
+
+  const { data: members } = await supabase
+    .from('users')
+    .select('id, expo_push_token, app_language')
+    .in('id', ids);
+
+  const uniqueMembers = dedupeRecipients(members);
+  if (!uniqueMembers.length) return;
+
+  const rows = uniqueMembers.map((m) => {
+    const { title, body, type, meta } = resolveMessage(payload, m.app_language);
+    return { user_id: m.id, title, body, type, meta };
+  });
+
+  await supabase.from('notifications').insert(rows);
+
+  const messages = await buildPushMessages(uniqueMembers, payload);
+  await sendPushNotifications(messages);
 };
 
 // Notify members — each user gets title/body in their app_language

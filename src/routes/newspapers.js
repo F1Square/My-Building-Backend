@@ -15,8 +15,15 @@ router.get('/recent', authenticate, requireRole('admin'), c.getRecentEditions);
 // User/Pramukh/Admin: open one edition by id (signed URL)
 router.get('/item/:id', authenticate, c.getEditionById);
 
+// Admin: signed upload URL for large PDFs (direct to Supabase)
+router.post('/upload-url', authenticate, requireRole('admin'), c.createUploadUrl);
+
 // Admin: upload or link edition (clear 413 when PDF exceeds newspaper limit)
 router.post('/', authenticate, requireRole('admin'), (req, res, next) => {
+  // JSON register (storage_path / url) — skip multer
+  const contentType = String(req.headers['content-type'] || '');
+  if (contentType.includes('application/json')) return next();
+
   c.upload.single('file')(req, res, (err) => {
     if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
       const maxMb = Math.round(c.MAX_NEWSPAPER_PDF_BYTES / (1024 * 1024));
