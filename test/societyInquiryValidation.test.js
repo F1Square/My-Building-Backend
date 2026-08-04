@@ -44,10 +44,15 @@ describe('societyInquiryValidation', () => {
       state: 'Gujarat',
       city: 'Surat',
       address: '395 Ring Road',
+      user_phone: '9876543210',
       society_logo: TINY_PNG,
       payment_methods: ['Cash'],
     };
     assert.equal(validateSocietyInquiryFields(valid), null);
+    assert.match(
+      validateSocietyInquiryFields({ ...valid, user_phone: '123' }),
+      /mobile/i,
+    );
     assert.match(
       validateSocietyInquiryFields({ ...valid, address: '123456' }),
       /cannot contain only numbers/i,

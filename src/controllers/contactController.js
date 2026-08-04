@@ -1,13 +1,19 @@
 const supabase = require('../supabase');
+const { isValidPhone } = require('../utils/validators');
 const { notifyOpsWebsiteContact } = require('../utils/mailService');
 
 // PUBLIC: website visitor submits contact form
 exports.submitContact = async (req, res) => {
-  const { name, email, subject, message } = req.body;
+  const { name, email, phone, subject, message } = req.body;
 
   if (!name?.trim()) return res.status(422).json({ error: 'Name is required' });
   if (!email?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()))
     return res.status(422).json({ error: 'Valid email is required' });
+  const mobile = String(phone || '').replace(/\D/g, '').slice(0, 10);
+  if (!mobile) return res.status(422).json({ error: 'Mobile number is required' });
+  if (!isValidPhone(mobile)) {
+    return res.status(422).json({ error: 'Enter a valid 10-digit Indian mobile number' });
+  }
   if (!subject?.trim()) return res.status(422).json({ error: 'Subject is required' });
   if (!message?.trim()) return res.status(422).json({ error: 'Message is required' });
   if (message.trim().length > 2000) return res.status(422).json({ error: 'Message must not exceed 2000 characters' });
@@ -17,6 +23,7 @@ exports.submitContact = async (req, res) => {
     .insert({
       name: name.trim(),
       email: email.trim().toLowerCase(),
+      phone: mobile,
       subject: subject.trim(),
       message: message.trim(),
       status: 'new',
@@ -25,6 +32,8 @@ exports.submitContact = async (req, res) => {
     .single();
 
   if (error) return res.status(400).json({ error: error.message });
+
+  // Best-effort ops email — do not fail the contact if mail fails
   await notifyOpsWebsiteContact(data);
 
   res.status(201).json({ message: 'Message received. We will get back to you soon!', contact: data });

@@ -15,6 +15,7 @@ function buildInquiryRow({
   user_id,
   user_name,
   user_email,
+  user_phone,
   body,
   paymentMethodValue,
 }) {
@@ -37,6 +38,7 @@ function buildInquiryRow({
     user_id,
     user_name,
     user_email,
+    user_phone: String(user_phone || '').trim(),
     society_type,
     society_name: society_name.trim(),
     total_wings: Number(total_wings),
@@ -110,6 +112,7 @@ exports.submitInquiry = async (req, res) => {
       user_id: req.user.id,
       user_name: displayName,
       user_email: req.user.email,
+      user_phone: body.user_phone,
       body,
       paymentMethodValue: payment.value,
     }),
@@ -175,6 +178,7 @@ exports.submitPublicInquiry = async (req, res) => {
       user_id: null,
       user_name: displayName,
       user_email: normalizedEmail,
+      user_phone: body.user_phone,
       body,
       paymentMethodValue: payment.value,
     }),
@@ -212,7 +216,7 @@ exports.getInquiries = async (req, res) => {
   if (search?.trim()) {
     const term = `%${search.trim()}%`;
     query = query.or(
-      `society_name.ilike.${term},city.ilike.${term},state.ilike.${term},user_name.ilike.${term},user_email.ilike.${term}`
+      `society_name.ilike.${term},city.ilike.${term},state.ilike.${term},user_name.ilike.${term},user_email.ilike.${term},user_phone.ilike.${term}`
     );
   }
   const { data, error } = await query;

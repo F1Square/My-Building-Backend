@@ -1,4 +1,6 @@
 /** Major cities by Indian state/UT — keep in sync with visitor-web/src/data/indiaLocations.ts */
+const { isValidPhone } = require('./validators');
+
 const INDIA_STATES_CITIES = {
   'Andaman and Nicobar Islands': ['Port Blair', 'Havelock Island', 'Diglipur'],
   'Andhra Pradesh': ['Visakhapatnam', 'Vijayawada', 'Guntur', 'Nellore', 'Kurnool', 'Tirupati', 'Rajahmundry', 'Kakinada'],
@@ -152,7 +154,14 @@ function validateSocietyInquiryFields(body, { requireLogo = true } = {}) {
     late_fee,
     payment_tc,
     society_logo,
+    user_phone,
   } = body;
+
+  const phone = String(user_phone || '').trim();
+  if (!phone) return 'Mobile number is required';
+  if (!isValidPhone(phone)) {
+    return 'Mobile number must be a valid 10-digit Indian mobile number';
+  }
 
   if (!society_name?.trim()) return 'Society name is required';
   if (society_name.trim().length > 100) return 'Society name must not exceed 100 characters';

@@ -85,6 +85,7 @@ async function notifyOpsSocietyInquiry(inquiry, source) {
     ['Type', inquiry?.society_type],
     ['Contact name', inquiry?.user_name],
     ['Contact email', inquiry?.user_email],
+    ['Mobile', inquiry?.user_phone],
     ['City', inquiry?.city],
     ['State', inquiry?.state],
     ['Pincode', inquiry?.pincode],
@@ -112,6 +113,7 @@ async function notifyOpsWebsiteContact(contact) {
   const rows = [
     ['Name', contact?.name],
     ['Email', contact?.email],
+    ['Mobile', contact?.phone],
     ['Subject', contact?.subject],
     ['Message', contact?.message],
     ['Contact id', contact?.id],
